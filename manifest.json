@@ -1,0 +1,9 @@
+{
+	"id": "html-latex-fix",
+	"name": "HTML LaTeX Fix",
+	"version": "0.1.0",
+	"minAppVersion": "0.15.0",
+	"description": "Fix LaTeX rendering inside HTML tags in Obsidian",
+	"author": "",
+	"isDesktopOnly": false
+}
