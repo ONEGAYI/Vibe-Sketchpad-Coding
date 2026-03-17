@@ -1,21 +1,21 @@
-# Changelog
+# 更新日志
 
-All notable changes to this project will be documented in this file.
+本文件记录项目的所有重要变更。
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
+版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [未发布]
 
-### Added
-- Phase 2: Live Preview support (CodeMirror 6 extension)
+### 新增
+- Phase 2: 实时预览模式支持（CodeMirror 6 扩展）
 
 ## [0.1.0] - 2026-03-17
 
-### Added
-- Initial release
-- Phase 1: Reading View support
-- Render LaTeX formulas (`$...$` and `$$...$$`) inside HTML tags
-- Support `\$` escape for literal dollar sign
-- Skip code blocks and already-rendered math elements
-- Auto deployment script (`deploy.mjs`)
+### 新增
+- 首次发布
+- Phase 1: 阅读模式支持
+- 渲染 HTML 标签内的 LaTeX 公式（`$...$` 行内公式和 `$$...$$` 块级公式）
+- 支持 `\$` 转义显示字面量美元符号
+- 自动跳过代码块和已渲染的公式元素
+- 自动部署脚本（`deploy.mjs`）
