@@ -16,3 +16,6 @@ main.js
 # OS
 .DS_Store
 Thumbs.db
+
+# Local config
+deploy.config.local.mjs
