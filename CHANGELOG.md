@@ -7,8 +7,21 @@
 
 ## [未发布]
 
+## [0.3.0] - 2026-03-17
+
 ### 新增
-- Phase 2: 实时预览模式支持（CodeMirror 6 扩展）
+- **Phase 2: 实时预览模式** - HTML 标签内的公式现在可以在实时预览模式下渲染
+  - 支持 `<div>`, `<span>`, `<details>`, `<summary>`, `<mark>` 标签
+  - 行内公式 `$...$` 和块级公式 `$$...$$`
+  - 光标交互：编辑时显示源码，离开时显示渲染结果
+  - 新增依赖: `@codemirror/language`
+
+### 技术细节
+- 新增 `src/live-preview/` 模块
+  - `math-widget.ts`: WidgetType 实现
+  - `html-region-finder.ts`: 语法树解析 HTML 区域
+  - `html-math-plugin.ts`: ViewPlugin 核心
+  - `index.ts`: 模块导出
 
 ## [0.2.0] - 2026-03-17
 

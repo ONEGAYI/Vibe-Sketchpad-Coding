@@ -20,11 +20,15 @@
 
 **设计文档**: `docs/superpowers/specs/2026-03-17-auto-formatter-design.md`
 
-## Phase 2: 实时预览模式 (未来)
+## Phase 2: 实时预览模式 ✅ (已完成)
 
-- [ ] CodeMirror 6 扩展
-- [ ] ViewPlugin + WidgetType
-- [ ] 语法树解析 HTML 区块
+- [x] CodeMirror 6 ViewPlugin
+- [x] WidgetType + Decoration.replace
+- [x] 语法树解析 HTML 区块
+- [x] 光标交互（inclusive: false）
+- [x] 复用 utils.findMathMatches
+
+**设计文档**: `docs/superpowers/specs/2026-03-17-live-preview-math-design.md`
 
 ## 未来扩展功能
 
