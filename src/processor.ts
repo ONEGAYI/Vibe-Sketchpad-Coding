@@ -44,18 +44,13 @@ export function createHtmlMathProcessor() {
 			return;
 		}
 
-		// 处理所有匹配（从后往前，避免索引偏移问题）
+		// 处理所有文本节点（每个节点一次性替换所有公式）
 		let needsFinishRender = false;
 
 		for (const { node, matches } of processingQueue) {
-			// 从后往前处理，这样索引不会变化
-			const sortedMatches = [...matches].sort((a, b) => b.startIndex - a.startIndex);
-
-			for (const match of sortedMatches) {
-				const success = await processMatch(node, match);
-				if (success) {
-					needsFinishRender = true;
-				}
+			const success = await processTextNode(node, matches);
+			if (success) {
+				needsFinishRender = true;
 			}
 		}
 
@@ -67,12 +62,12 @@ export function createHtmlMathProcessor() {
 }
 
 /**
- * 处理单个匹配
- * 注意：每次处理后文本节点会被分割，需要返回新的文本节点供后续使用
+ * 处理单个文本节点中的所有公式匹配
+ * 一次性替换所有公式，避免多次 DOM 操作导致的引用问题
  */
-async function processMatch(
+async function processTextNode(
 	textNode: Text,
-	match: MathMatch
+	matches: MathMatch[]
 ): Promise<boolean> {
 	const parent = textNode.parentNode;
 	if (!parent) return false;
@@ -80,39 +75,34 @@ async function processMatch(
 	const text = textNode.textContent;
 	if (!text) return false;
 
-	// 检查索引是否仍然有效（可能被之前的处理改变）
-	if (match.startIndex >= text.length || match.endIndex > text.length) {
-		return false;
-	}
-
-	// 验证匹配内容
-	const actualContent = text.substring(match.startIndex, match.endIndex);
-	const expectedPrefix = match.type === 'block' ? '$$' : '$';
-	if (!actualContent.startsWith(expectedPrefix)) {
-		return false;
-	}
-
 	try {
-		// 渲染公式
 		const { renderMathElement } = await import('./math-renderer');
-		const mathEl = renderMathElement(match.content, match.type === 'block');
 
-		// 分割文本并插入公式节点
-		const beforeText = text.substring(0, match.startIndex);
-		const afterText = text.substring(match.endIndex);
-
-		// 创建文档片段
+		// 创建文档片段，按顺序插入文本和公式
 		const fragment = document.createDocumentFragment();
+		let lastIndex = 0;
 
-		if (beforeText) {
-			fragment.appendChild(document.createTextNode(beforeText));
+		for (const match of matches) {
+			// 添加匹配前的普通文本
+			if (match.startIndex > lastIndex) {
+				const beforeText = text.substring(lastIndex, match.startIndex);
+				fragment.appendChild(document.createTextNode(beforeText));
+			}
+
+			// 渲染并添加公式元素
+			const mathEl = renderMathElement(match.content, match.type === 'block');
+			fragment.appendChild(mathEl);
+
+			lastIndex = match.endIndex;
 		}
-		fragment.appendChild(mathEl);
-		if (afterText) {
+
+		// 添加最后一个匹配后的文本
+		if (lastIndex < text.length) {
+			const afterText = text.substring(lastIndex);
 			fragment.appendChild(document.createTextNode(afterText));
 		}
 
-		// 替换原节点
+		// 一次性替换原节点
 		parent.replaceChild(fragment, textNode);
 
 		return true;
