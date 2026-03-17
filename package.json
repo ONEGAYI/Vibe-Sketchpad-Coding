@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-html-latex-fix",
-	"version": "0.1.1",
+	"version": "0.2.0",
 	"description": "Fix LaTeX rendering inside HTML tags in Obsidian's Reading View.",
 	"main": "main.js",
 	"type": "module",
@@ -12,7 +12,13 @@
 		"bump:minor": "node version-bump.mjs minor",
 		"bump:major": "node version-bump.mjs major"
 	},
-	"keywords": ["obsidian", "plugin", "latex", "math", "html"],
+	"keywords": [
+		"obsidian",
+		"plugin",
+		"latex",
+		"math",
+		"html"
+	],
 	"license": "MIT",
 	"devDependencies": {
 		"@types/node": "^22.0.0",

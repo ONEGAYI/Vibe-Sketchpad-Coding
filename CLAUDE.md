@@ -1,5 +1,10 @@
 # HTML LaTeX Fix - Obsidian 插件
 
+## 工具使用与命令
+
+- 每次对话开始前使用 superpowers mcp
+- 使用 serena 的 LSP 功能辅助代码浏览与探索
+
 ## 项目概述
 
 解决 Obsidian 中 HTML 标签内 LaTeX 公式无法渲染的问题。
@@ -17,10 +22,20 @@
 
 ```
 src/
-├── main.ts           # 插件入口，生命周期管理
-├── processor.ts      # MarkdownPostProcessor 核心逻辑
-├── math-renderer.ts  # renderMath/finishRenderMath 封装
-└── utils.ts          # 正则定义、节点过滤、工具函数
+├── main.ts              # 插件入口，生命周期管理
+├── processor.ts         # MarkdownPostProcessor 核心逻辑
+├── math-renderer.ts     # renderMath/finishRenderMath 封装
+├── utils.ts             # 正则定义、节点过滤、工具函数
+├── styles.css           # UI 组件样式
+├── checker/
+│   └── formula-checker.ts   # 公式问题检测器
+├── fixer/
+│   └── formula-fixer.ts     # 公式问题修复器
+├── types/
+│   └── problem.ts           # 问题数据结构
+└── ui/
+    ├── notice-ui.ts         # 通知弹窗
+    └── detail-modal.ts      # 详情弹窗
 ```
 
 ## 开发命令
@@ -41,6 +56,15 @@ npm run deploy   # 部署到 Obsidian
 2. 正则匹配 `$...$` (行内) 和 `$$...$$` (块级)
 3. 调用 `obsidian.renderMath()` 渲染公式
 4. 替换 DOM 节点，调用 `finishRenderMath()`
+
+### Phase 1.5: 自动格式化助手 (已实现)
+
+检测 HTML 标签内公式中未转义的 `<` `>` 符号：
+- 右下角弹窗提示 + 一键修复
+- 详情弹窗显示问题列表
+- 触发时机：打开文档、保存、切换到阅读模式
+- 智能空格处理（符号紧邻字母时自动添加空格）
+- 支持 Ctrl+Z 撤销
 
 ### Phase 2: 实时预览 (计划中)
 
