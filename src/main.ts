@@ -17,6 +17,7 @@ import { fixFormulaProblems } from './fixer/formula-fixer';
 import { showProblemNotice } from './ui/notice-ui';
 import { DetailModal } from './ui/detail-modal';
 import { ProblemItem } from './types/problem';
+import { livePreviewExtensions } from './live-preview';
 
 // 防抖计时器
 let checkDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -32,6 +33,9 @@ export default class HtmlMathFixPlugin extends Plugin {
 		// 创建并注册 PostProcessor（Phase 1 功能）
 		this.processor = createHtmlMathProcessor();
 		this.registerMarkdownPostProcessor(this.processor);
+
+		// 注册实时预览扩展（Phase 2 功能）
+		this.registerEditorExtension(livePreviewExtensions);
 
 		// 注册事件监听（Phase 1.5 自动格式化助手）
 		this.registerEventListeners();
