@@ -1,20 +1,36 @@
 # Obsidian HTML Tag LaTeX Fix - Roadmap
 
-## Phase 1: 阅读模式 (当前)
-- [ ] 使用 MarkdownPostProcessor 拦截 DOM
-- [ ] TreeWalker 遍历文本节点
-- [ ] 正则匹配 $...$ 和 $$...$$
-- [ ] 调用 obsidian.renderMath() 渲染
+## Phase 1: 阅读模式 ✅ (已完成)
+
+- [x] 使用 MarkdownPostProcessor 拦截 DOM
+- [x] TreeWalker 遍历文本节点
+- [x] 正则匹配 $...$ 和 $$...$$
+- [x] 调用 obsidian.renderMath() 渲染
+- [x] 修复同一文本节点中多个公式渲染问题
+
+## Phase 1.5: 自动格式化助手 (进行中)
+
+- [ ] 检测 HTML 标签内公式中的 `<` `>` 符号
+- [ ] 右下角弹窗提示 + 一键修复按钮
+- [ ] 详情弹窗显示所有问题（行号、上下文）
+- [ ] 触发时机：打开文档、切换阅读模式、保存
+- [ ] 支持 Ctrl+Z 撤销
+- [ ] 齿轮按钮跳转设置（占位）
+
+**设计文档**: `docs/superpowers/specs/2026-03-17-auto-formatter-design.md`
 
 ## Phase 2: 实时预览模式 (未来)
+
 - [ ] CodeMirror 6 扩展
 - [ ] ViewPlugin + WidgetType
 - [ ] 语法树解析 HTML 区块
 
 ## 未来扩展功能
-- [ ] **自动格式化助手**：检测并提示用户将 HTML 标签内公式中的 `<`、`>` 等符号替换为 `&lt;`、`&gt;`，避免被浏览器错误解析
-  - 可作为编辑器 lint 提示或自动修复功能
-  - 属于预防性功能，不影响渲染核心
+
+### 自动格式化助手后续
+- [ ] 设置页面：开关、自定义触发时机
+- [ ] 批量处理：多文档检测
+- [ ] 更多符号：`&` → `\&` 等
 
 ### 配置项（Phase 1 后续迭代）
 - [ ] 插件开关
