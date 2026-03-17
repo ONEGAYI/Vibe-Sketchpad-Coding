@@ -181,8 +181,8 @@ export class MathWidget extends WidgetType {
 **职责：** ViewPlugin 核心，协调装饰器生成
 
 ```typescript
-import { ViewPlugin, Decoration, DecorationSet, EditorView } from '@codemirror/view';
-import { ViewUpdate, Range } from '@codemirror/state';
+import { ViewPlugin, Decoration, DecorationSet, EditorView, ViewUpdate } from '@codemirror/view';
+import type { Range } from '@codemirror/state';
 import { findHtmlRegionsInRange, findMathInHtmlRegion } from './html-region-finder';
 import { MathWidget } from './math-widget';
 
@@ -296,19 +296,55 @@ Decoration.replace({
 ### 版本要求
 
 - **Obsidian**: 1.0.0+（支持 CodeMirror 6）
-- **依赖**: `@codemirror/view`, `@codemirror/state`, `@codemirror/language`（Obsidian 内置，无需单独安装）
+- **新增依赖**: `@codemirror/language`（需要安装）
 
 ### 依赖说明
+
+```bash
+# 需要安装的依赖
+npm install @codemirror/language
+```
 
 ```typescript
 // 从 CodeMirror 包导入（Obsidian 内置）
 import { ViewPlugin, Decoration, DecorationSet, EditorView } from '@codemirror/view';
 import type { ViewUpdate, Range } from '@codemirror/state';
+
+// 需要单独安装
 import { syntaxTree } from '@codemirror/language';
 
 // 从 Obsidian API 导入
 import { renderMath, finishRenderMath } from 'obsidian';
 ```
+
+### 备选方案（不安装 @codemirror/language）
+
+如果不想增加依赖，可以使用正则表达式识别 HTML 区域：
+
+```typescript
+// 简化版：使用正则匹配 HTML 标签
+const HTML_TAG_REGEX = /<(div|span|details|summary|mark)[^>]*>([\s\S]*?)<\/\1>/g;
+
+function findHtmlRegionsByRegex(text: string, basePos: number): HtmlRegion[] {
+  const regions: HtmlRegion[] = [];
+  let match;
+  while ((match = HTML_TAG_REGEX.exec(text)) !== null) {
+    // 计算标签内容的位置（不含标签本身）
+    const tagStart = match.index;
+    const contentStart = tagStart + match[0].indexOf('>') + 1;
+    const contentEnd = contentStart + match[2].length;
+    regions.push({
+      from: basePos + contentStart,
+      to: basePos + contentEnd
+    });
+  }
+  return regions;
+}
+```
+
+**权衡**：
+- 语法树方案：准确但需要额外依赖
+- 正则方案：无额外依赖但可能误匹配（如字符串中的 `<div>`）
 
 ### 公式匹配
 
