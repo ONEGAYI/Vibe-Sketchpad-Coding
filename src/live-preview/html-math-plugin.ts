@@ -25,11 +25,21 @@ export const htmlMathPlugin = ViewPlugin.fromClass(
     /**
      * 更新装饰器
      *
-     * 触发条件：文档变化 或 视口变化
+     * 触发条件：文档变化、视口变化、或光标位置变化
      */
     update(update: ViewUpdate) {
-      if (update.docChanged || update.viewportChanged) {
+      // 监听三种变化：文档修改、视口滚动、光标移动
+      if (update.docChanged || update.viewportChanged || update.transactions.some(tr => tr.selection)) {
+        console.log('[HtmlMathPlugin] update 触发, docChanged:%s, viewportChanged:%s, selectionChanged:%s',
+                    update.docChanged, update.viewportChanged, update.transactions.some(tr => tr.selection));
+
+        const oldDecoCount = this.decorations.size;
         this.decorations = this.buildDecorations(update.view);
+
+        // 关键日志：观察装饰器数量的变化
+        if (oldDecoCount !== this.decorations.size) {
+          console.log(`[HtmlMathPlugin] 装饰器数量变化: ${oldDecoCount} -> ${this.decorations.size}`);
+        }
       }
     }
 
@@ -37,36 +47,57 @@ export const htmlMathPlugin = ViewPlugin.fromClass(
      * 构建装饰器集合
      *
      * 只处理可见区域内的 HTML 公式
+     * 光标在公式所在行时不创建装饰器（显示源码便于编辑）
      */
     buildDecorations(view: EditorView): DecorationSet {
       const builder: Range<Decoration>[] = [];
+      const doc = view.state.doc;
 
-      // 只处理可见区域（性能优化）
-      for (const { from, to } of view.visibleRanges) {
-        // 找到可见区域内的 HTML 区域
-        const regions = findHtmlRegionsInRange(view, from, to);
+      // 获取当前光标所在的行号
+      const cursorLine = doc.lineAt(view.state.selection.main.head);
 
-        for (const region of regions) {
-          // 获取 HTML 区域内的文本
-          const text = view.state.doc.sliceString(region.from, region.to);
+      // 获取完整的可见范围（合并所有 visibleRanges）
+      const minFrom = Math.min(...view.visibleRanges.map(r => r.from));
+      const maxTo = Math.max(...view.visibleRanges.map(r => r.to));
 
-          // 在区域内匹配公式
-          const matches = findMathInHtmlRegion(text, region.from);
+      // 找到可见区域内的 HTML 区域
+      const regions = findHtmlRegionsInRange(view, minFrom, maxTo);
 
-          for (const match of matches) {
-            // 创建 Widget
-            const widget = new MathWidget(match.content, match.isBlock);
+      for (const region of regions) {
+        // 获取 HTML 区域所在的行范围
+        const regionStartLine = doc.lineAt(region.from);
+        const regionEndLine = doc.lineAt(region.to);
 
-            // 创建替换装饰器
-            // inclusive: false 使得光标进入时装饰器自动隐藏
-            const deco = Decoration.replace({
-              widget,
-              inclusive: false
-            });
+        // 检查光标是否在 HTML 区域覆盖的任何行上
+        const cursorInRegionLines = cursorLine.number >= regionStartLine.number &&
+                                     cursorLine.number <= regionEndLine.number;
 
-            // 添加到构建器
-            builder.push(deco.range(match.from, match.to));
-          }
+        // 如果光标在 HTML 区域所在的行上，跳过（显示源码便于编辑）
+        if (cursorInRegionLines) {
+          console.log('[HtmlMathPlugin] 跳过区域 (光标在第 %d 行，区域在第 %d-%d 行)',
+                      cursorLine.number, regionStartLine.number, regionEndLine.number);
+          continue;
+        }
+
+        // 获取 HTML 区域内的文本
+        const text = doc.sliceString(region.from, region.to);
+
+        // 在区域内匹配公式
+        const matches = findMathInHtmlRegion(text, region.from);
+
+        for (const match of matches) {
+          console.log('[HtmlMathPlugin] 渲染公式: $%s$ (位置 %d-%d)', match.content, match.from, match.to);
+          // 创建 Widget
+          const widget = new MathWidget(match.content, match.isBlock);
+
+          // 创建替换装饰器
+          const deco = Decoration.replace({
+            widget,
+            inclusive: false
+          });
+
+          // 添加到构建器
+          builder.push(deco.range(match.from, match.to));
         }
       }
 

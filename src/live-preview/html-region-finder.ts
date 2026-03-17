@@ -60,6 +60,17 @@ export function findHtmlRegions(view: EditorView): HtmlRegion[] {
 
 /**
  * 在指定范围内识别 HTML 区域（性能优化版本）
+ *
+ * Obsidian/HyperMD 语法树结构：
+ * - bracket_hmd-html-begin_tag: <
+ * - tag: div (标签名)
+ * - attribute: style
+ * - string: "text-align: center;"
+ * - bracket_tag: > 或 />
+ * - bracket_hmd-html-end_tag: >
+ * - bracket_tag: </ (闭标签开始)
+ * - tag: div (闭标签名)
+ * - bracket_hmd-html-end_tag: >
  */
 export function findHtmlRegionsInRange(
   view: EditorView,
@@ -67,24 +78,36 @@ export function findHtmlRegionsInRange(
   to: number
 ): HtmlRegion[] {
   const regions: HtmlRegion[] = [];
-  const tree = syntaxTree(view.state);
+  const doc = view.state.doc;
 
-  tree.iterate({
-    from,
-    to,
-    enter(node) {
-      const nodeName = node.name;
-      if (nodeName === 'HTMLBlock' || nodeName === 'HTMLTag') {
-        const text = view.state.doc.sliceString(node.from, node.to);
-        if (isSupportedHtmlTag(text)) {
-          const innerRegion = extractInnerRegion(node.from, node.to, text);
-          if (innerRegion) {
-            regions.push(innerRegion);
-          }
-        }
-      }
+  // 获取完整的可见范围（合并所有 visibleRanges）
+  // 因为 HTML 标签可能跨越多个不连续的可见范围
+  const minFrom = Math.min(...view.visibleRanges.map(r => r.from));
+  const maxTo = Math.max(...view.visibleRanges.map(r => r.to));
+
+  // 使用正则直接在文档中查找 HTML 标签
+  // 这是更可靠的方法，因为语法树结构复杂
+  const text = doc.sliceString(minFrom, maxTo);
+
+  // 匹配 <tag ...>content</tag> 格式
+  const htmlTagRegex = /<(div|span|details|summary|mark)([^>]*)>([\s\S]*?)<\/\1>/gi;
+  let match;
+  while ((match = htmlTagRegex.exec(text)) !== null) {
+    const tagName = match[1];
+    const attributes = match[2];
+    const content = match[3];
+    const fullMatchStart = minFrom + match.index;
+    const openTagEnd = fullMatchStart + `<${tagName}${attributes}>`.length;
+    const closeTagStart = fullMatchStart + match[0].length - `</${tagName}>`.length;
+
+    if (content.trim()) {
+      console.log('[HtmlRegionFinder] 发现 HTML 区域: <%s> (位置 %d-%d)', tagName, openTagEnd, closeTagStart);
+      regions.push({
+        from: openTagEnd,
+        to: closeTagStart
+      });
     }
-  });
+  }
 
   return regions;
 }

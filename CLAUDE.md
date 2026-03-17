@@ -31,6 +31,11 @@ src/
 │   └── formula-checker.ts   # 公式问题检测器
 ├── fixer/
 │   └── formula-fixer.ts     # 公式问题修复器
+├── live-preview/            # Phase 2: 实时预览模式 (暂缓)
+│   ├── index.ts             # 模块入口
+│   ├── html-math-plugin.ts  # ViewPlugin 核心
+│   ├── html-region-finder.ts# HTML 区域识别
+│   └── math-widget.ts       # WidgetType 实现
 ├── types/
 │   └── problem.ts           # 问题数据结构
 └── ui/
@@ -66,9 +71,17 @@ npm run deploy   # 部署到 Obsidian
 - 智能空格处理（符号紧邻字母时自动添加空格）
 - 支持 Ctrl+Z 撤销
 
-### Phase 2: 实时预览 (计划中)
+### Phase 2: 实时预览 ⚠️ (暂缓)
 
-使用 CodeMirror 6 扩展，详见 `memory/ROADMAP.md`。
+架构已完成，但存在核心问题未解决（公式渲染闪烁后变回源码）。
+
+**已识别的问题**:
+1. `display: contents` 破坏 CodeMirror 尺寸测量
+2. `finishRenderMath()` 全局队列冲突
+3. 可见区域文本截断导致正则失效
+
+**详细报告**: `docs/live-preview-development-report.md`
+**设计文档**: `docs/superpowers/specs/2026-03-17-live-preview-math-design.md`
 
 ## 关键 API
 
@@ -108,6 +121,8 @@ Phase 1 采用零配置策略，开箱即用。
 
 ## 文档
 
-- `docs/superpowers/specs/2026-03-17-html-latex-fix-design.md` — 设计规格
+- `docs/superpowers/specs/2026-03-17-html-latex-fix-design.md` — 阅读模式设计规格
+- `docs/superpowers/specs/2026-03-17-live-preview-math-design.md` — 实时预览设计规格
+- `docs/live-preview-development-report.md` — 实时预览开发报告（问题分析、暂缓原因）
 - `memory/ROADMAP.md` — 功能路线图
 - `CHANGELOG.md` — 更新日志

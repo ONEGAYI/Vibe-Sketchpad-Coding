@@ -28,7 +28,7 @@ export default class HtmlMathFixPlugin extends Plugin {
 	private lastCheckedFile: string | null = null;
 
 	async onload() {
-		console.log('HtmlMathFix: Loading plugin');
+		console.log('HtmlMathFix: 加载插件');
 
 		// 创建并注册 PostProcessor（Phase 1 功能）
 		this.processor = createHtmlMathProcessor();
@@ -40,7 +40,7 @@ export default class HtmlMathFixPlugin extends Plugin {
 		// 注册事件监听（Phase 1.5 自动格式化助手）
 		this.registerEventListeners();
 
-		console.log('HtmlMathFix: Plugin loaded successfully');
+		console.log('HtmlMathFix: 插件加载完成');
 	}
 
 	onunload() {
