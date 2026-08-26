@@ -1,0 +1,4 @@
+interface:
+  display_name: "部署文件树技能"
+  short_description: "把 file-tree 技能部署/升级到任意仓库：dist 快照复制即部署，镜像同步清理旧残留，数据无损"
+  default_prompt: "使用 $deploy-file-tree-skill 把文件树技能部署到指定仓库。"

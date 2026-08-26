@@ -10,13 +10,19 @@ VibeSketchpadCoding/
 ├── CLAUDE.md      # 通过 @AGENTS.md 导入主文件，仅附加 Claude 专属补充
 ├── .gitignore     # 通用忽略规则（各工具子目录可按需追加自有条目）
 └── skills/        # 技能源码成员目录（入库的技能快照，非对本仓库的部署实例）
-    └── file-tree/     # 文件树技能：tree.json 唯一数据源 + tree_tool.py 唯一维护脚本
+    └── deploy-file-tree-skill/    # 技能母体：把 file-tree 技能部署/升级到任意仓库
         ├── README.md              # 工具说明：用途、用法、技术栈
-        ├── SKILL.md               # 技能主入口：核心约定、命令速查、条目字段
+        ├── SKILL.md               # 技能主入口：结构、命令、部署语义、升级流程
         ├── agents/openai.yaml     # Codex 元数据
-        └── scripts/
-            ├── tree_tool.py       # 唯一维护脚本（add/rm/get/query/check/render/undo 等）
-            └── tree_tool_test.py  # 契约测试（沙箱模式，不触仓库）
+        ├── scripts/
+        │   ├── deploy.py          # deploy / update-dist 命令实现
+        │   └── deploy_test.py     # 契约测试（沙箱目标仓库）
+        └── dist/                  # file-tree 技能发行快照（公用四件套，部署即复制）
+            ├── SKILL.md               # file-tree 技能主入口：约定、命令、字段
+            ├── agents/openai.yaml     # Codex 元数据
+            └── scripts/
+                ├── tree_tool.py       # file-tree 唯一维护脚本
+                └── tree_tool_test.py  # file-tree 契约测试
 ```
 
 > 新增/删除工具时必须同步维护此文件树，摘要描述以"刚好覆盖文件内容"为准。

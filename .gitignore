@@ -6,6 +6,9 @@ build/
 target/
 *.log
 
+# 例外：deploy-file-tree-skill 的 dist/ 是技能发行快照（源码而非构建产物），需入库
+!skills/deploy-file-tree-skill/dist/
+
 # Python 字节码
 __pycache__/
 *.pyc
