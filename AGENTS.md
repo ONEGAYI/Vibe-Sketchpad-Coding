@@ -8,7 +8,15 @@
 VibeSketchpadCoding/
 ├── AGENTS.md      # 本文件：agent 通用规则单一事实源（项目说明、文件树、规范）
 ├── CLAUDE.md      # 通过 @AGENTS.md 导入主文件，仅附加 Claude 专属补充
-└── .gitignore     # 通用忽略规则（各工具子目录可按需追加自有条目）
+├── .gitignore     # 通用忽略规则（各工具子目录可按需追加自有条目）
+└── skills/        # 技能源码成员目录（入库的技能快照，非对本仓库的部署实例）
+    └── file-tree/     # 文件树技能：tree.json 唯一数据源 + tree_tool.py 唯一维护脚本
+        ├── README.md              # 工具说明：用途、用法、技术栈
+        ├── SKILL.md               # 技能主入口：核心约定、命令速查、条目字段
+        ├── agents/openai.yaml     # Codex 元数据
+        └── scripts/
+            ├── tree_tool.py       # 唯一维护脚本（add/rm/get/query/check/render/undo 等）
+            └── tree_tool_test.py  # 契约测试（沙箱模式，不触仓库）
 ```
 
 > 新增/删除工具时必须同步维护此文件树，摘要描述以"刚好覆盖文件内容"为准。
@@ -18,6 +26,7 @@ VibeSketchpadCoding/
 - 每个小工具一个子目录，命名用 kebab-case（如 `todo-quick/`）
 - 工具子目录内自带 `README.md`，说明用途、用法、技术栈
 - 依赖不提升到根目录，保持各工具独立；根目录只放规则文件与文档
+- 技能源码统一放 `skills/` 目录，同样一技能一子目录（kebab-case）、自带 `README.md`；入库的是技能快照原样副本，不接管本仓库自身的文件树
 
 ## 提交规范
 

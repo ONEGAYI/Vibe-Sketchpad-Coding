@@ -6,6 +6,10 @@ build/
 target/
 *.log
 
+# Python 字节码
+__pycache__/
+*.pyc
+
 # 环境与密钥
 .env
 .env.*
