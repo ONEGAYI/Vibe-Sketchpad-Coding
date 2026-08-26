@@ -1,6 +1,6 @@
 ---
 name: deploy-file-tree-skill
-description: 把 file-tree 技能（文件树唯一数据源 + 唯一维护脚本）部署到任意指定仓库。当用户说"把这个文件树技能部署/安装到某仓库"、"升级某仓库的 file-tree 技能"、"提取/更新发行版快照"时使用。dist/ 是公用四件套快照，部署即复制（无需压缩解包），升级为镜像同步：除目标仓库的 tree.json 数据与本机撤销历史外一切以 dist 为准，废弃文件清理到位。
+description: 把 file-tree 技能（文件树唯一数据源 + 唯一维护脚本）部署到任意指定仓库。当用户说"把这个文件树技能部署/安装到某仓库"、"升级某仓库的 file-tree 技能"、"提取/更新发行版快照"时使用。dist/ 是公用四件套快照兼开发主线（主仓库 Vibe-Sketchpad-Coding），部署即复制（无需压缩解包），升级为镜像同步：除目标仓库的 tree.json 数据与本机撤销历史外一切以 dist 为准，废弃文件清理到位。
 ---
 
 # 部署 file-tree 技能
@@ -14,7 +14,7 @@ deploy-file-tree-skill/
 ├── scripts/
 │   ├── deploy.py          # deploy / update-dist 命令
 │   └── deploy_test.py     # 契约测试（沙箱目标仓库）
-└── dist/                  # file-tree 技能发行版快照（公用内容，微缩于此）
+└── dist/                  # file-tree 技能开发主线兼发行快照（公用内容，微缩于此）
     ├── SKILL.md           # 技能主入口（通用说明）
     ├── agents/openai.yaml
     └── scripts/
@@ -24,13 +24,15 @@ deploy-file-tree-skill/
 
 dist 只含**公用四件套**，不含任何仓库数据——`tree.json`（文件树数据）、`.history.json`（本机撤销历史）、AGENTS.md（目标仓库的规则文档）都属于各仓库私有。
 
+**开发主线在此**：file-tree 技能的迭代直接修改主仓库（Vibe-Sketchpad-Coding）`skills/deploy-file-tree-skill/dist/` 下的四件套；脚本以自身位置相对定位 dist，主仓库副本与本机安装副本（`~/.agents/skills/deploy-file-tree-skill/`）均可运行 deploy。
+
 ## 命令
 
 ```bash
 # 部署 / 升级（目标仓库路径；默认装到 .agents/skills/file-tree/）
 python ~/.agents/skills/deploy-file-tree-skill/scripts/deploy.py deploy <目标仓库> [--skill-dir .agents/skills/file-tree]
 
-# 从源仓库（开发主线）提取四件套刷新 dist 快照
+# 应急回收：从任意仓库的部署实例提取四件套刷新 dist（散落改动未主线化时用，非常规流程）
 python ~/.agents/skills/deploy-file-tree-skill/scripts/deploy.py update-dist <源仓库> [--source-dir .agents/skills/file-tree]
 ```
 
@@ -43,9 +45,12 @@ python ~/.agents/skills/deploy-file-tree-skill/scripts/deploy.py update-dist <�
 
 ## 升级流程（技能迭代时）
 
-1. 在源仓库（开发主线，如 QuotaTray）修改 file-tree 技能并验证（`tree_tool_test.py` 全绿 + `check --strict`）；
-2. `update-dist <源仓库>` 刷新快照；
-3. 对每个已部署仓库执行 `deploy <目标仓库>`——数据不动，只同步代码与说明。
+1. 在主仓库（Vibe-Sketchpad-Coding）`skills/deploy-file-tree-skill/dist/` 直接修改 file-tree 技能并验证（`dist/scripts/tree_tool_test.py` 全绿；自举用例在无数据环境自动跳过，部署后在目标仓库 `check --strict` 复核）；
+2. 提交主仓库——dist 即开发主线，不再经 update-dist 中转；
+3. 对每个已部署仓库执行 `deploy <目标仓库>`——数据不动，只同步代码与说明；
+4. 同步本机使用副本：复制主仓库的母体文件（SKILL.md、scripts/）与 dist 四件套到 `~/.agents/skills/deploy-file-tree-skill/`，保持调用入口与主线一致。
+
+> 旧主线（QuotaTray `.agents/skills/file-tree/`）自批量命令版本（PR #47 合并）起降级为普通部署点。update-dist 保留应急语义：从任意部署实例提取四件套回收散落改动。
 
 ## 部署后引导（转告目标仓库的使用者）
 

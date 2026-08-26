@@ -9,7 +9,9 @@ dist/ 是 file-tree 技能的发行版快照——公用四件套
 永不动（升级时允许对 tree.json 做规范化结构迁移，如补 kind 派生字段，
 数据语义不变），保证数据无损且废弃文件升级到位。
 
-源仓库（开发主线）迭代后先 update-dist 刷新快照，再逐仓库 deploy。
+开发主线在主仓库（Vibe-Sketchpad-Coding）的 skills/deploy-file-tree-skill/dist/：
+直接改 dist、验证后逐仓库 deploy，并同步本机使用副本。update-dist 仅作应急
+回收：从指定仓库的部署实例提取四件套刷新 dist。
 
 用法：
   python deploy.py deploy <目标仓库路径> [--skill-dir .agents/skills/file-tree]
