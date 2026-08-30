@@ -20,6 +20,7 @@ from tree_tool import (  # noqa: E402
     _cmd_add,
     _cmd_add_batch,
     _cmd_mv,
+    _cmd_mv_batch,
     _cmd_query,
     _cmd_rm_batch,
     _cmd_root,
@@ -1255,6 +1256,223 @@ class CmdMvTest(SandboxTest):
         with redirect_stdout(buf):
             _cmd_mv(tool, types.SimpleNamespace(src="apps/util.ts", dst="lib/util.ts"))
         self.assertIn("已迁移并重渲染: apps/util.ts -> lib/util.ts（重写 1 条 rel 边）", buf.getvalue())
+
+
+class MvBatchTest(SandboxTest):
+    """mv-batch：一份清单 = 一次变更 = 一步历史；批内互斥预校验，任一非法整批拒绝。"""
+
+    def moves_basic(self) -> list[dict]:
+        return [
+            {"src": "apps/util.ts", "dst": "lib/util.ts"},
+            {"src": "Cargo.toml", "dst": "conf/Cargo.toml"},
+        ]
+
+    def assert_batch_rejected(self, tool: TreeTool, moves) -> None:
+        """拒绝即原子：tree.json 字节不变，撤销栈与重做栈均空（调用前须无历史）。"""
+        before = tool.tree_json.read_text(encoding="utf-8")
+        with self.assertRaises(ToolError):
+            tool.mv_batch(moves)
+        self.assertEqual(tool.tree_json.read_text(encoding="utf-8"), before)
+        undo, redo = tool.history_summary()
+        self.assertEqual((undo, redo), ([], []))
+
+    def test_moves_all_entries_with_fields(self):
+        tool = self.make_tool()
+        n, edges = tool.mv_batch(self.moves_basic())
+        self.assertEqual((n, edges), (2, 0))
+        util = tool.get("lib/util.ts")
+        self.assertEqual(util["desc"], "工具")
+        self.assertEqual(util["detail"], ["纯函数工具集"])
+        self.assertEqual(util["tags"], ["pure"])
+        self.assertEqual(tool.get("conf/Cargo.toml")["detail"][0][:9], "workspace")
+        with self.assertRaises(ToolError):
+            tool.get("apps/util.ts")
+        self.assertIn("main.tsx", tool.get("apps")["children"])  # 有兄弟则源父目录保留
+
+    def test_shared_dst_parent_auto_created(self):
+        tool = self.make_tool()
+        tool.mv_batch([
+            {"src": "apps/util.ts", "dst": "lib/core/util.ts"},
+            {"src": "Cargo.toml", "dst": "lib/conf.toml"},
+        ])
+        lib_children = set(tool.get("lib")["children"])
+        self.assertEqual(lib_children, {"core", "conf.toml"})
+        self.assertIn("util.ts", tool.get("lib/core")["children"])
+
+    def test_rel_rewrite_stacking_batch_internal(self):
+        """批内互指：两者都移动，rel 边最终指向对方新路径（与清单顺序无关）。"""
+        tool = self.make_tool()
+        tool.add("apps/main.tsx", rel=["apps/util.ts"])
+        tool.mv_batch([
+            {"src": "apps/main.tsx", "dst": "src/main.tsx"},
+            {"src": "apps/util.ts", "dst": "lib/util.ts"},
+        ])
+        self.assertEqual(tool.get("src/main.tsx")["rel"], ["lib/util.ts"])
+        tool.render()
+        errors, _ = tool.check()
+        self.assertEqual(errors, [])
+
+    def test_rel_rewrite_stacking_external(self):
+        tool = self.make_tool()
+        tool.add("docs/guide.md", desc="指南", detail=["d"],
+                 rel=["Cargo.toml", "apps/util.ts"])
+        _, edges = tool.mv_batch(self.moves_basic())
+        self.assertEqual(edges, 2)
+        self.assertEqual(tool.get("docs/guide.md")["rel"], ["conf/Cargo.toml", "lib/util.ts"])
+
+    def test_moves_dir_with_subtree(self):
+        tool = self.make_tool()
+        tool.mv_batch([{"src": "apps", "dst": "src/apps"}])
+        self.assertEqual(tool.get("src/apps")["desc"], "应用层")
+        self.assertIn("main.tsx", tool.get("src/apps")["children"])
+        self.assertNotIn("apps", tool.load()["tree"])
+
+    def test_single_history_step_undo_restores_all(self):
+        tool = self.make_tool()
+        tool.add("docs/guide.md", desc="指南", detail=["d"], rel=["apps/util.ts"])
+        tool.mv_batch(self.moves_basic())
+        undo, redo = tool.history_summary()
+        self.assertEqual(undo, ["add docs/guide.md", "mv-batch 2 条"])
+        self.assertEqual(redo, [])
+        tool.undo()
+        self.assertEqual(tool.get("apps/util.ts")["desc"], "工具")
+        self.assertEqual(tool.get("docs/guide.md")["rel"], ["apps/util.ts"])
+        with self.assertRaises(ToolError):
+            tool.get("lib/util.ts")
+        with self.assertRaises(ToolError):
+            tool.get("conf/Cargo.toml")
+
+    def test_redo_restores_whole_batch(self):
+        tool = self.make_tool()
+        tool.mv_batch(self.moves_basic())
+        tool.undo()
+        op = tool.redo()
+        self.assertEqual(op, "mv-batch 2 条")
+        self.assertEqual(tool.get("lib/util.ts")["desc"], "工具")
+
+    def test_reject_bad_manifest_structure(self):
+        tool = self.make_tool()
+        for bad in ([], {}, {"no_moves": []}, {"moves": "x"}, {"moves": []}):
+            with self.assertRaises(ToolError, msg=repr(bad)):
+                tool.mv_batch(bad)
+
+    def test_reject_bad_entry(self):
+        tool = self.make_tool()
+        for bad in (
+            ["not-object"],
+            [{"src": "apps/util.ts"}],                       # 缺 dst
+            [{"dst": "lib/util.ts"}],                        # 缺 src
+            [{"src": "apps/util.ts", "dst": ""}],            # 空 dst
+            [{"src": 1, "dst": "lib/util.ts"}],              # 非字符串
+            [{"src": "apps/util.ts", "dst": "lib/x", "why": "x"}],  # 未知字段
+        ):
+            with self.assertRaises(ToolError, msg=repr(bad)):
+                tool.mv_batch(bad)
+
+    def test_reject_path_variant_duplicates(self):
+        """反斜杠/双斜杠变体归一化后同判批内重复。"""
+        tool = self.make_tool()
+        self.assert_batch_rejected(tool, [
+            {"src": "apps/util.ts", "dst": "a.ts"},
+            {"src": "apps\\util.ts", "dst": "b.rs"},
+        ])
+        self.assert_batch_rejected(tool, [
+            {"src": "apps/util.ts", "dst": "lib/util.ts"},
+            {"src": "Cargo.toml", "dst": "lib//util.ts"},
+        ])
+
+    def test_reject_single_entry_violations(self):
+        """单条四关（src==dst / src 缺失 / dst 已存在 / 自嵌套）任一失败整批拒绝。"""
+        tool = self.make_tool()
+        self.assert_batch_rejected(tool, [
+            {"src": "apps/util.ts", "dst": "apps/util.ts"},
+            {"src": "Cargo.toml", "dst": "conf/Cargo.toml"},
+        ])
+        self.assert_batch_rejected(tool, [
+            {"src": "apps/util.ts", "dst": "lib/util.ts"},
+            {"src": "nope.rs", "dst": "lib/nope.rs"},
+        ])
+        self.assert_batch_rejected(tool, [
+            {"src": "apps/util.ts", "dst": "lib/util.ts"},
+            {"src": "Cargo.toml", "dst": "apps/main.tsx"},
+        ])
+        self.assert_batch_rejected(tool, [
+            {"src": "apps", "dst": "apps/sub"},
+        ])
+
+    def test_reject_src_ancestor_descendant(self):
+        tool = self.make_tool()
+        self.assert_batch_rejected(tool, [
+            {"src": "apps", "dst": "src/apps"},
+            {"src": "apps/main.tsx", "dst": "src/main.tsx"},
+        ])
+
+    def test_reject_dst_ancestor_descendant(self):
+        tool = self.make_tool()
+        self.assert_batch_rejected(tool, [
+            {"src": "apps/util.ts", "dst": "t/u"},
+            {"src": "Cargo.toml", "dst": "t/u/v"},
+        ])
+
+    def test_reject_move_chain(self):
+        """不支持批内移动链：第一条的 dst 恰是第二条的 src——初始树上该 dst 已存在，单条校验即拦截。"""
+        data = {"tags": {}, "tree": {
+            "apps": {"desc": "应用层", "children": {"util.ts": {"desc": "工具", "detail": ["x"]}}},
+            "mid": {"desc": "中转", "children": {"x.rs": {"desc": "x", "detail": ["x"]}}},
+        }}
+        tool = self.make_tool(data=data)
+        self.assert_batch_rejected(tool, [
+            {"src": "apps/util.ts", "dst": "mid/x.rs"},
+            {"src": "mid/x.rs", "dst": "end/x.rs"},
+        ])
+
+    def test_reject_dst_inside_other_src_subtree(self):
+        """目的地不得落在批内其他移动的源子树内（否则随源整体被搬走）。清单顺序两种都拒。"""
+        tool = self.make_tool()
+        moves = [
+            {"src": "apps", "dst": "src/apps"},
+            {"src": "Cargo.toml", "dst": "apps/renamed.toml"},
+        ]
+        self.assert_batch_rejected(tool, moves)
+        self.assert_batch_rejected(tool, list(reversed(moves)))
+
+
+class CmdMvBatchTest(SandboxTest):
+    """CLI 层 mv-batch：清单读取/解析契约与写后自动渲染。"""
+
+    def write_manifest(self, tool: TreeTool, obj) -> str:
+        path = tool.tree_json.parent / "moves.json"
+        path.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
+        return str(path)
+
+    def test_cmd_reads_manifest_and_renders(self):
+        import types
+
+        tool = self.make_tool()
+        manifest = self.write_manifest(tool, {"moves": [{"src": "apps/util.ts", "dst": "lib/util.ts"}]})
+        _cmd_mv_batch(tool, types.SimpleNamespace(manifest=manifest))
+        self.assertEqual(tool.get("lib/util.ts")["desc"], "工具")
+        self.assertIn("lib/", tool.agents_md.read_text(encoding="utf-8"))
+
+    def test_cmd_rejects_missing_file_and_bad_json(self):
+        import types
+
+        tool = self.make_tool()
+        with self.assertRaises(ToolError):
+            _cmd_mv_batch(tool, types.SimpleNamespace(manifest=str(tool.tree_json.parent / "nope.json")))
+        path = tool.tree_json.parent / "moves.json"
+        path.write_text("{不是JSON", encoding="utf-8")
+        with self.assertRaises(ToolError):
+            _cmd_mv_batch(tool, types.SimpleNamespace(manifest=str(path)))
+
+    def test_cmd_rejects_non_moves_structure(self):
+        import types
+
+        tool = self.make_tool()
+        for obj in ([], {}, {"no_moves": []}, {"moves": "x"}):
+            manifest = self.write_manifest(tool, obj)
+            with self.assertRaises(ToolError):
+                _cmd_mv_batch(tool, types.SimpleNamespace(manifest=manifest))
 
 
 class CmdBatchTest(SandboxTest):

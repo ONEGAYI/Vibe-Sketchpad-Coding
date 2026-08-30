@@ -20,6 +20,7 @@ AGENTS.md 不存在则生成最小骨架。detail 完整描述只存于 tree.jso
                          [--collapsed|--no-collapsed] [--hidden|--no-hidden]
   python tree_tool.py rm <path>
   python tree_tool.py mv <src> <dst>
+  python tree_tool.py mv-batch <manifest.json>
   python tree_tool.py get <path>
   python tree_tool.py query [--kw 关键词] [--tag 标签] [--rel-of 路径] [--json]
   python tree_tool.py tag-add <名> -d 说明
@@ -617,6 +618,54 @@ class TreeTool:
         self.write_data(data)
         return len(all_parts)
 
+    MOVE_ENTRY_FIELDS = frozenset({"src", "dst"})
+
+    def _normalize_move_entry(self, idx: int, entry) -> dict:
+        """清单条目 → {src, dst}：恰含两个非空字符串字段，未知字段拒绝（同 add-batch 严格性）。"""
+        if not isinstance(entry, dict):
+            raise ToolError(f"mv-batch 第 {idx} 条不是对象: {entry!r}")
+        unknown = [k for k in entry if k not in self.MOVE_ENTRY_FIELDS]
+        if unknown:
+            raise ToolError(f"mv-batch 条目含未知字段 {unknown}: {entry.get('src')!r}")
+        src, dst = entry.get("src"), entry.get("dst")
+        for field, val in (("src", src), ("dst", dst)):
+            if not isinstance(val, str) or not val:
+                raise ToolError(f"mv-batch 第 {idx} 条 {field} 缺失或非字符串")
+        return {"src": src, "dst": dst}
+
+    def mv_batch(self, moves) -> tuple[int, int]:
+        """批量迁移：预校验批内 src/dst 互斥后逐条 _apply_mv，任一非法整批拒绝（原子）。返回 (条数, 重写边数)。"""
+        if not isinstance(moves, list) or not moves:
+            raise ToolError('mv-batch 清单须为非空 moves 数组，如 {"moves": [{"src": "a.ts", "dst": "b/a.ts"}]}')
+        specs = [self._normalize_move_entry(i + 1, e) for i, e in enumerate(moves)]
+        srcs = ["/".join(split_rel_path(s["src"])) for s in specs]
+        dsts = ["/".join(split_rel_path(s["dst"])) for s in specs]
+        if len(set(srcs)) != len(srcs):
+            raise ToolError("批内 src 重复（多条移动同一源）")
+        if len(set(dsts)) != len(dsts):
+            raise ToolError("批内 dst 重复（多条移动到同一目的地）")
+        for a in srcs:
+            for b in srcs:
+                if a != b and b.startswith(a + "/"):
+                    raise ToolError(f"批内 src 互为祖先-后代（移祖先已覆盖后代）: {a} ⊃ {b}")
+        for a in dsts:
+            for b in dsts:
+                if a != b and b.startswith(a + "/"):
+                    raise ToolError(f"批内 dst 互为祖先-后代: {a} ⊃ {b}")
+        for i, d in enumerate(dsts):
+            for j, s in enumerate(srcs):
+                if i != j and (d == s or d.startswith(s + "/")):
+                    raise ToolError(f"目的地落在批内其他移动的源路径上（不支持移动链/嵌套目的地）: {d}")
+        # 单条四关（src==dst / src 存在 / dst 不存在 / 无自嵌套）不做静态预校验：互斥规则保证
+        # 逐条应用互不干扰，_apply_mv 应用期校验等价于初始树校验，且错误消息自带具体路径
+        data = self.load()
+        edges = 0
+        for spec in specs:
+            edges += self._apply_mv(data, spec["src"], spec["dst"])
+        self._record_undo(f"mv-batch {len(specs)} 条")
+        self.write_data(data)
+        return len(specs), edges
+
     # ---------- 词表 ----------
 
     def tag_add(self, name: str, desc: str) -> None:
@@ -903,6 +952,24 @@ def _cmd_mv(tool: TreeTool, args) -> None:
     print(f"已迁移并重渲染: {args.src} -> {args.dst}{suffix}")
 
 
+def _cmd_mv_batch(tool: TreeTool, args) -> None:
+    manifest = Path(args.manifest)
+    try:
+        raw = manifest.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ToolError(f"清单文件不可读: {manifest}（{exc}）")
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ToolError(f"清单 JSON 解析失败: {exc}")
+    if not isinstance(obj, dict) or not isinstance(obj.get("moves"), list):
+        raise ToolError('清单顶层须为对象且含 "moves" 数组，如 {"moves": [{"src": "a.ts", "dst": "b/a.ts"}]}')
+    n, edges = tool.mv_batch(obj["moves"])
+    tool.render()
+    parts = [f"重写 {edges} 条 rel 边", "一次变更，单步历史"] if edges else ["一次变更，单步历史"]
+    print(f"已批量迁移并重渲染: {n} 条（{'；'.join(parts)}）")
+
+
 def _cmd_add_batch(tool: TreeTool, args) -> None:
     manifest = Path(args.manifest)
     try:
@@ -1085,6 +1152,9 @@ def main(argv=None) -> int:
     p.add_argument("src", help="原路径")
     p.add_argument("dst", help="新路径（不得为已存在路径、不得位于源子树内）")
 
+    p = sub.add_parser("mv-batch", help="批量迁移（JSON 清单）：一次变更单步历史；批内 src/dst 互斥预校验，任一条非法整批拒绝")
+    p.add_argument("manifest", help='清单 JSON 路径，顶层为 {"moves": [{"src": "a.ts", "dst": "b/a.ts"}, ...]}')
+
     p = sub.add_parser("get", help="查看单个条目")
     p.add_argument("path")
 
@@ -1129,6 +1199,7 @@ def main(argv=None) -> int:
         "rm": _cmd_rm,
         "rm-batch": _cmd_rm_batch,
         "mv": _cmd_mv,
+        "mv-batch": _cmd_mv_batch,
         "get": _cmd_get,
         "query": _cmd_query,
         "tag-add": _cmd_tag_add,
