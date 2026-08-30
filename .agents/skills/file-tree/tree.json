@@ -1,0 +1,321 @@
+{
+  "root": "Vibe-Sketchpad-Coding",
+  "tags": {
+    "doc": "说明文档",
+    "script": "维护脚本",
+    "skill": "技能母体或部署实例的组成条目",
+    "test": "契约测试"
+  },
+  "tree": {
+    ".agents": {
+      "kind": "dir",
+      "desc": "本仓库技能部署目录",
+      "children": {
+        "skills": {
+          "kind": "dir",
+          "desc": "部署技能根目录",
+          "children": {
+            "file-tree": {
+              "kind": "dir",
+              "desc": "file-tree 部署实例",
+              "detail": [
+                "本仓库自身的文件树维护实例，升级以母体 dist 为准"
+              ],
+              "collapsed": true,
+              "children": {
+                "agents": {
+                  "kind": "dir",
+                  "desc": "Codex 元数据目录",
+                  "children": {
+                    "openai.yaml": {
+                      "kind": "file",
+                      "desc": "Codex 元数据",
+                      "detail": [
+                        "file-tree 技能（部署实例）的 Codex 元数据"
+                      ],
+                      "tags": [
+                        "skill"
+                      ]
+                    }
+                  }
+                },
+                "scripts": {
+                  "kind": "dir",
+                  "desc": "file-tree 脚本目录",
+                  "children": {
+                    "tree_tool.py": {
+                      "kind": "file",
+                      "desc": "file-tree 唯一维护脚本",
+                      "detail": [
+                        "add/rm/query/tag/check/undo/render/root 等全部命令实现"
+                      ],
+                      "rel": [
+                        "skills/deploy-file-tree-skill/dist/scripts/tree_tool.py"
+                      ],
+                      "tags": [
+                        "script",
+                        "skill"
+                      ]
+                    },
+                    "tree_tool_test.py": {
+                      "kind": "file",
+                      "desc": "file-tree 契约测试",
+                      "detail": [
+                        "无数据环境下自举用例自动跳过"
+                      ],
+                      "rel": [
+                        ".agents/skills/file-tree/scripts/tree_tool.py"
+                      ],
+                      "tags": [
+                        "skill",
+                        "test"
+                      ]
+                    }
+                  }
+                },
+                "SKILL.md": {
+                  "kind": "file",
+                  "desc": "file-tree 技能主入口",
+                  "detail": [
+                    "核心约定、命令速查、条目字段、渲染产物索引"
+                  ],
+                  "rel": [
+                    "skills/deploy-file-tree-skill/dist/SKILL.md"
+                  ],
+                  "tags": [
+                    "doc",
+                    "skill"
+                  ]
+                },
+                "tree.json": {
+                  "kind": "file",
+                  "desc": "文件树唯一数据源",
+                  "detail": [
+                    "本仓库文件树条目数据",
+                    "只通过 scripts/tree_tool.py 维护，禁止手改"
+                  ],
+                  "tags": [
+                    "skill"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    ".gitignore": {
+      "kind": "file",
+      "desc": "通用忽略规则",
+      "detail": [
+        "依赖与构建产物、Python 字节码、环境密钥等通用忽略",
+        "含 dist/ 全局忽略与 skills/deploy-file-tree-skill/dist/ 的入库否定规则"
+      ]
+    },
+    "AGENTS.md": {
+      "kind": "file",
+      "desc": "agent 规则单一事实源",
+      "detail": [
+        "项目说明、组织约定、提交与发布规范",
+        "文件树与标签词表两个标记块由 file-tree 技能渲染，禁止手改"
+      ]
+    },
+    "CLAUDE.md": {
+      "kind": "file",
+      "desc": "Claude 专属补充规则",
+      "detail": [
+        "通过 @AGENTS.md 导入主文件，仅附加 Claude 专属补充"
+      ]
+    },
+    "skills": {
+      "kind": "dir",
+      "desc": "技能源码成员目录",
+      "detail": [
+        "母体即开发主线，非对本仓库的部署实例"
+      ],
+      "children": {
+        "accelerated-learning": {
+          "kind": "dir",
+          "desc": "教师式学习技能母体",
+          "detail": [
+            "纯提示词技能，无脚本无依赖",
+            "~/.agents/skills/accelerated-learning/ 是本机使用副本"
+          ],
+          "collapsed": true,
+          "children": {
+            "README.md": {
+              "kind": "file",
+              "desc": "工具说明：用途、用法、技术栈",
+              "detail": [
+                "用途（六步学习闭环的纯提示词技能）、用法、技术栈",
+                "本目录即开发主线，~/.agents/skills/accelerated-learning/ 是本机使用副本"
+              ],
+              "tags": [
+                "doc",
+                "skill"
+              ]
+            },
+            "SKILL.md": {
+              "kind": "file",
+              "desc": "技能主入口：六步学习闭环",
+              "detail": [
+                "教师职责、启动诊断、六步学习闭环、进度与复习、完成标准、每轮交互格式"
+              ],
+              "tags": [
+                "doc",
+                "skill"
+              ]
+            }
+          }
+        },
+        "deploy-file-tree-skill": {
+          "kind": "dir",
+          "desc": "file-tree 部署器母体",
+          "detail": [
+            "把 file-tree 技能部署/升级到任意仓库"
+          ],
+          "collapsed": true,
+          "children": {
+            "agents": {
+              "kind": "dir",
+              "desc": "Codex 元数据目录",
+              "children": {
+                "openai.yaml": {
+                  "kind": "file",
+                  "desc": "Codex 元数据",
+                  "detail": [
+                    "部署器技能的 Codex 元数据"
+                  ],
+                  "tags": [
+                    "skill"
+                  ]
+                }
+              }
+            },
+            "dist": {
+              "kind": "dir",
+              "desc": "file-tree 开发主线快照",
+              "detail": [
+                "公用四件套，部署即复制；名为 dist 实为源码形态快照，已加 gitignore 否定规则"
+              ],
+              "children": {
+                "agents": {
+                  "kind": "dir",
+                  "desc": "Codex 元数据目录",
+                  "children": {
+                    "openai.yaml": {
+                      "kind": "file",
+                      "desc": "Codex 元数据",
+                      "detail": [
+                        "file-tree 技能快照的 Codex 元数据"
+                      ],
+                      "tags": [
+                        "skill"
+                      ]
+                    }
+                  }
+                },
+                "scripts": {
+                  "kind": "dir",
+                  "desc": "file-tree 脚本目录",
+                  "children": {
+                    "tree_tool.py": {
+                      "kind": "file",
+                      "desc": "file-tree 唯一维护脚本",
+                      "detail": [
+                        "开发主线：迭代直接改此文件并验证后逐仓库 deploy"
+                      ],
+                      "tags": [
+                        "script",
+                        "skill"
+                      ]
+                    },
+                    "tree_tool_test.py": {
+                      "kind": "file",
+                      "desc": "file-tree 契约测试",
+                      "detail": [
+                        "file-tree 契约测试（dist 快照）：tree_tool.py 的全量不变量测试，无数据环境自举用例自动跳过"
+                      ],
+                      "rel": [
+                        "skills/deploy-file-tree-skill/dist/scripts/tree_tool.py"
+                      ],
+                      "tags": [
+                        "skill",
+                        "test"
+                      ]
+                    }
+                  }
+                },
+                "SKILL.md": {
+                  "kind": "file",
+                  "desc": "file-tree 主入口快照",
+                  "detail": [
+                    "约定、命令、字段——开发主线即此文件"
+                  ],
+                  "tags": [
+                    "doc",
+                    "skill"
+                  ]
+                }
+              }
+            },
+            "README.md": {
+              "kind": "file",
+              "desc": "工具说明：用途、用法、技术栈",
+              "detail": [
+                "用途（deploy / update-dist）、部署语义（镜像同步、数据保护）、用法与技术栈"
+              ],
+              "tags": [
+                "doc",
+                "skill"
+              ]
+            },
+            "scripts": {
+              "kind": "dir",
+              "desc": "部署器脚本目录",
+              "children": {
+                "deploy.py": {
+                  "kind": "file",
+                  "desc": "部署器命令行入口",
+                  "detail": [
+                    "deploy：把 dist 四件套镜像同步部署/升级到目标仓库",
+                    "update-dist：应急回收，从部署实例提取四件套刷新 dist"
+                  ],
+                  "tags": [
+                    "script",
+                    "skill"
+                  ]
+                },
+                "deploy_test.py": {
+                  "kind": "file",
+                  "desc": "契约测试（沙箱目标仓库）",
+                  "detail": [
+                    "deploy.py 的契约测试，沙箱目标仓库模式，不触真实仓库"
+                  ],
+                  "rel": [
+                    "skills/deploy-file-tree-skill/scripts/deploy.py"
+                  ],
+                  "tags": [
+                    "skill",
+                    "test"
+                  ]
+                }
+              }
+            },
+            "SKILL.md": {
+              "kind": "file",
+              "desc": "技能主入口：部署与升级",
+              "detail": [
+                "结构、命令、部署语义（镜像同步）、升级流程、部署后引导"
+              ],
+              "tags": [
+                "doc",
+                "skill"
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

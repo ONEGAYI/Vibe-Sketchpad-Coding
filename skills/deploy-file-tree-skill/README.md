@@ -2,7 +2,7 @@
 
 「deploy-file-tree-skill」技能母体本体：把 file-tree 技能（`dist/` 公用四件套）部署或升级到任意指定仓库。
 
-> **本目录即 file-tree 技能的开发主线**——迭代直接改 `dist/` 四件套并在本仓库提交，`~/.agents/skills/deploy-file-tree-skill/` 是本机使用副本（主线变更后复制同步）。`dist/` 虽名为 dist，但它是**源码形态的快照而非构建产物**——仓库 `.gitignore` 已为此加否定规则。母体不接管本仓库的文件树；本仓库自身也未部署 file-tree 技能。
+> **本目录即 file-tree 技能的开发主线**——迭代直接改 `dist/` 四件套并在本仓库提交，`~/.agents/skills/deploy-file-tree-skill/` 是本机使用副本（主线变更后复制同步）。`dist/` 虽名为 dist，但它是**源码形态的快照而非构建产物**——仓库 `.gitignore` 已为此加否定规则。本仓库自身也已部署 file-tree 技能（`.agents/skills/file-tree/`，tree.json 数据私有），与 `skills/` 下的母体快照互不接管。
 
 ## 用途
 
