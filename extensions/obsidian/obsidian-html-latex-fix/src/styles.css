@@ -1,0 +1,93 @@
+/* HtmlMathFix - 自动格式化助手样式 */
+
+/* 通知弹窗样式 */
+.html-math-fix-notice-title {
+	font-weight: 600;
+	margin-bottom: 8px;
+}
+
+.html-math-fix-notice-desc {
+	color: var(--text-muted);
+	font-size: 12px;
+	margin-bottom: 12px;
+}
+
+.html-math-fix-notice-buttons {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+}
+
+.html-math-fix-settings-btn {
+	padding: 4px 8px !important;
+	font-size: 14px;
+}
+
+/* 详情弹窗样式 */
+.html-math-fix-detail-modal h2 {
+	margin-top: 0;
+	margin-bottom: 16px;
+}
+
+.detail-modal-count {
+	color: var(--text-muted);
+	margin-bottom: 16px;
+}
+
+.detail-modal-list {
+	max-height: 300px;
+	overflow-y: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	margin-bottom: 16px;
+}
+
+.detail-modal-item {
+	padding: 12px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	cursor: help;
+}
+
+.detail-modal-item:last-child {
+	border-bottom: none;
+}
+
+.detail-modal-item:hover {
+	background: var(--background-secondary);
+}
+
+.detail-modal-line {
+	font-weight: 600;
+	margin-bottom: 4px;
+}
+
+.detail-modal-line-num {
+	color: var(--text-accent);
+}
+
+.detail-modal-context {
+	font-family: var(--font-monospace);
+	font-size: 12px;
+	background: var(--background-primary-alt);
+	padding: 4px 8px;
+	border-radius: 4px;
+	margin-bottom: 4px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.detail-modal-indicator {
+	color: var(--text-warning);
+	font-size: 11px;
+}
+
+.detail-modal-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+}
+
+.has-tooltip {
+	cursor: help;
+}

@@ -1,0 +1,21 @@
+.serena
+.claude
+
+reference/
+
+# Dependencies
+node_modules/
+
+# Build output
+main.js
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config
+deploy.config.local.mjs
