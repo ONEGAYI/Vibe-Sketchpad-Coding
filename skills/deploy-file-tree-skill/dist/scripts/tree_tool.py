@@ -664,8 +664,8 @@ class TreeTool:
                 if i != j and (s == d or s.startswith(d + "/")):
                     raise ToolError(f"源路径落在批内其他移动的目的地上（后续条会看见前序结果）: {s}")
         # 单条四关（src==dst / src 存在 / dst 不存在 / 无自嵌套）不做静态预校验：上述双向互斥
-        # 保证每条 move 独立作用于初始树——src 不因前序挂载而出现、dst 不因前序修剪/挂载而变化，
-        # _apply_mv 应用期校验等价于初始树校验，且错误消息自带具体路径
+        # 保证校验等价——src 不因前序挂载而出现、dst 不因前序修剪/挂载而变化，应用期校验即
+        # 初始树校验；变换结果与逐条同序执行一致（dst 父链可能因前序修剪后重建为空骨架）
         data = self.load()
         edges = 0
         for spec in specs:
