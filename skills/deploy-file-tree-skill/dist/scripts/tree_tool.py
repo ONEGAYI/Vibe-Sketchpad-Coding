@@ -634,7 +634,10 @@ class TreeTool:
         return {"src": src, "dst": dst}
 
     def mv_batch(self, moves) -> tuple[int, int]:
-        """批量迁移：预校验批内 src/dst 互斥后逐条 _apply_mv，任一非法整批拒绝（原子）。返回 (条数, 重写边数)。"""
+        """批量迁移：预校验批内 src/dst 双向互斥后逐条 _apply_mv，任一非法整批拒绝（原子）。
+
+        返回 (条数, 重写边数)；重写边数按重写动作累计，批内叠加改写计多次（与逐条执行合计一致）。
+        """
         if not isinstance(moves, list) or not moves:
             raise ToolError('mv-batch 清单须为非空 moves 数组，如 {"moves": [{"src": "a.ts", "dst": "b/a.ts"}]}')
         specs = [self._normalize_move_entry(i + 1, e) for i, e in enumerate(moves)]
@@ -656,8 +659,13 @@ class TreeTool:
             for j, s in enumerate(srcs):
                 if i != j and (d == s or d.startswith(s + "/")):
                     raise ToolError(f"目的地落在批内其他移动的源路径上（不支持移动链/嵌套目的地）: {d}")
-        # 单条四关（src==dst / src 存在 / dst 不存在 / 无自嵌套）不做静态预校验：互斥规则保证
-        # 逐条应用互不干扰，_apply_mv 应用期校验等价于初始树校验，且错误消息自带具体路径
+        for i, s in enumerate(srcs):
+            for j, d in enumerate(dsts):
+                if i != j and (s == d or s.startswith(d + "/")):
+                    raise ToolError(f"源路径落在批内其他移动的目的地上（后续条会看见前序结果）: {s}")
+        # 单条四关（src==dst / src 存在 / dst 不存在 / 无自嵌套）不做静态预校验：上述双向互斥
+        # 保证每条 move 独立作用于初始树——src 不因前序挂载而出现、dst 不因前序修剪/挂载而变化，
+        # _apply_mv 应用期校验等价于初始树校验，且错误消息自带具体路径
         data = self.load()
         edges = 0
         for spec in specs:
