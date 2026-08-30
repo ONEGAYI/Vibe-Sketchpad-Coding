@@ -4,13 +4,10 @@
  */
 
 import { ProblemItem } from '../types/problem';
+import { findMathMatchesStrict } from '../utils';
 
 // HTML 标签正则（匹配 <tag>...</tag>）
 const HTML_TAG_REGEX = /<([a-zA-Z][a-zA-Z0-9]*)[^>]*>[\s\S]*?<\/\1>/g;
-
-// 公式正则
-const INLINE_MATH_REGEX = /(?<!\$)\$(?!\$)([^\$\n]+?)\$/g;
-const BLOCK_MATH_REGEX = /\$\$([\s\S]+?)\$\$/g;
 
 // 问题符号配置
 const PROBLEM_SYMBOLS = {
@@ -46,6 +43,7 @@ export function checkFormulaProblems(content: string): ProblemItem[] {
 
 /**
  * 在 HTML 块内查找公式问题
+ * 使用严格扫描：伪匹配回退 + code 区域过滤 + 块级优先去重（见 utils.findMathMatchesStrict）
  */
 function findProblemsInHtmlBlock(
 	htmlBlock: string,
@@ -54,23 +52,10 @@ function findProblemsInHtmlBlock(
 ): ProblemItem[] {
 	const problems: ProblemItem[] = [];
 
-	// 查找块级公式
-	BLOCK_MATH_REGEX.lastIndex = 0;
-	let match: RegExpExecArray | null;
-	while ((match = BLOCK_MATH_REGEX.exec(htmlBlock)) !== null) {
-		const formulaContent = match[1];
-		const formulaStart = htmlStart + match.index;
-		const found = findSymbolsInFormula(formulaContent, formulaStart + 2, lines);
-		problems.push(...found);
-	}
-
-	// 查找行内公式
-	INLINE_MATH_REGEX.lastIndex = 0;
-	while ((match = INLINE_MATH_REGEX.exec(htmlBlock)) !== null) {
-		const formulaContent = match[1];
-		const formulaStart = htmlStart + match.index;
-		const found = findSymbolsInFormula(formulaContent, formulaStart + 1, lines);
-		problems.push(...found);
+	for (const match of findMathMatchesStrict(htmlBlock)) {
+		const delimLen = match.type === 'block' ? 2 : 1;
+		const formulaStart = htmlStart + match.startIndex + delimLen;
+		problems.push(...findSymbolsInFormula(match.content, formulaStart, lines));
 	}
 
 	return problems;

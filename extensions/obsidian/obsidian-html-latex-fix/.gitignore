@@ -19,3 +19,5 @@ Thumbs.db
 
 # Local config
 deploy.config.local.mjs
+# Test build output
+temp/

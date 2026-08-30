@@ -10,7 +10,8 @@
 		"deploy": "node deploy.mjs",
 		"bump:patch": "node version-bump.mjs patch",
 		"bump:minor": "node version-bump.mjs minor",
-		"bump:major": "node version-bump.mjs major"
+		"bump:major": "node version-bump.mjs major",
+		"test": "tsc -noEmit -skipLibCheck && node scripts/run-tests.mjs"
 	},
 	"keywords": [
 		"obsidian",
