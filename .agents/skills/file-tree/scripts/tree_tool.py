@@ -504,8 +504,9 @@ class TreeTool:
         # 先挂载后摘除：同父重命名且源是父目录唯一孩子时，先摘会把共同父目录修剪后以空骨架重建、丢失其信息
         dst_parent["children"][dst_parts[-1]] = node
         self._remove_entry(data, src_parts, src)
-        # 不做全树 rel 兜底校验：重写是保存在性映射（旧目标在树中则新目标必在），不引入新悬空；
-        # 反之全量校验会让树上任何既有悬空（rm 的合法产物）阻塞无关的 mv，而 mv 正是修复悬空的手段
+        # 不做全树 rel 兜底校验：它会让树上任何既有悬空（rm 的合法产物）阻塞无关的 mv，
+        # 而 mv 正是修复悬空的手段。重写本身是保存在性映射（旧目标在树中则新目标必在）；
+        # 唯一例外是源端父链修剪——指向被修剪祖先的边会悬空（同 rm 口径，由 check 报 E 兜底）
         return self._rewrite_rel(data, src_key, dst_key)
 
     def _rewrite_rel(self, data, old_key, new_key) -> int:

@@ -1008,7 +1008,7 @@ class MvTest(SandboxTest):
     """mv：条目带信息迁移（含子树）——数据层操作不碰磁盘，全树自动重写指向旧路径的 rel 边。"""
 
     def assert_mv_rejected(self, tool: TreeTool, src: str, dst: str) -> None:
-        """拒绝即原子：tree.json 字节不变，撤销栈与重做栈均空。"""
+        """拒绝即原子：tree.json 字节不变，撤销栈与重做栈均空（调用前须无历史）。"""
         before = tool.tree_json.read_text(encoding="utf-8")
         with self.assertRaises(ToolError):
             tool.mv(src, dst)
@@ -1187,6 +1187,22 @@ class MvTest(SandboxTest):
         tool.rm("apps/tmp.rs")  # rm 不重写 rel，guide.md 的边悬空
         tool.mv("Cargo.toml", "Cargo.lock")
         self.assertEqual(tool.get("docs/guide.md")["rel"], ["apps/tmp.rs"])  # 悬空边原样留给 check 报告
+
+    def test_pruned_ancestor_rel_left_dangling_for_check(self):
+        """源端父链修剪可使指向被修剪祖先的 rel 边悬空——同 rm 口径，由 check 报 E 兜底。"""
+        data = {"tags": {}, "tree": {
+            "apps": {"desc": "应用层", "children": {"util.ts": {"desc": "工具", "detail": ["x"]}}},
+            "docs.md": {"desc": "文档", "detail": ["d"], "rel": ["apps"]},
+        }}
+        tool = self.make_tool(data=data)
+        n = tool.mv("apps/util.ts", "lib/util.ts")  # apps 变空被修剪
+        self.assertEqual(n, 0)  # 指向祖先 apps 的边不在前缀改写范围
+        self.assertEqual(tool.get("docs.md")["rel"], ["apps"])  # 悬空边原样保留
+        with self.assertRaises(ToolError):
+            tool.get("apps")
+        tool.render()
+        errors, _ = tool.check()
+        self.assertTrue(any("rel 目标不在树中" in e for e in errors))
 
     def test_mv_leaves_disk_files_alone(self):
         """数据层迁移不碰磁盘：真实文件留在原位，新路径不产生文件。"""
