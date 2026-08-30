@@ -141,6 +141,417 @@
             "面向 Obsidian 的扩展类小工具（插件、脚本、CSS snippet 等）"
           ],
           "children": {
+            "obsidian-html-latex-fix": {
+              "kind": "dir",
+              "desc": "HTML 内 LaTeX 渲染修复插件",
+              "detail": [
+                "插件 id html-latex-fix v0.3.0：修复阅读视图中 HTML 标签内 LaTeX 公式不渲染问题",
+                "由独立仓库 Obsidian-Html-Tag-Fix 前缀合并迁入，git log --follow 可溯完整历史",
+                "技术栈 TypeScript + esbuild + Obsidian API；实时预览模式（live-preview）架构就绪、核心暂缓"
+              ],
+              "collapsed": true,
+              "children": {
+                ".gitignore": {
+                  "kind": "file",
+                  "desc": "插件自身忽略规则",
+                  "detail": [
+                    "忽略 node_modules、构建产物 main.js、temp/、reference/、本地部署配置与 .serena/.claude 等工具目录"
+                  ]
+                },
+                "CHANGELOG.md": {
+                  "kind": "file",
+                  "desc": "版本变更记录",
+                  "detail": [
+                    "Keep a CHANGELOG 格式中文记录；0.3.0 含 Phase 2 实时预览架构（核心暂缓）"
+                  ],
+                  "tags": [
+                    "doc"
+                  ]
+                },
+                "CLAUDE.md": {
+                  "kind": "file",
+                  "desc": "插件项目工作规则",
+                  "detail": [
+                    "源项目的 Claude 专属规则：构建命令、代码风格、架构概览"
+                  ],
+                  "tags": [
+                    "doc"
+                  ]
+                },
+                "deploy.mjs": {
+                  "kind": "file",
+                  "desc": "部署脚本",
+                  "detail": [
+                    "按 deploy.config.local.mjs（不入库）将构建产物部署到 Obsidian vault 插件目录"
+                  ],
+                  "tags": [
+                    "script"
+                  ]
+                },
+                "docs": {
+                  "kind": "dir",
+                  "desc": "项目文档",
+                  "detail": [
+                    "立项对话、开发报告与 superpowers 设计规格/实现计划存档"
+                  ],
+                  "children": {
+                    "chat-with-ai-for-basic-planning.md": {
+                      "kind": "file",
+                      "desc": "立项对话记录",
+                      "detail": [
+                        "与 AI 讨论渲染原理与从底层修复可行性的原始对话"
+                      ],
+                      "tags": [
+                        "doc"
+                      ]
+                    },
+                    "live-preview-development-report.md": {
+                      "kind": "file",
+                      "desc": "实时预览开发报告",
+                      "detail": [
+                        "Phase 2 暂缓时的状态记录：已完成架构与遗留问题"
+                      ],
+                      "tags": [
+                        "doc"
+                      ]
+                    },
+                    "superpowers": {
+                      "kind": "dir",
+                      "desc": "设计规格与计划存档",
+                      "children": {
+                        "plans": {
+                          "kind": "dir",
+                          "desc": "实现计划",
+                          "children": {
+                            "2026-03-17-auto-formatter.md": {
+                              "kind": "file",
+                              "desc": "自动格式化实现计划",
+                              "detail": [
+                                "superpowers 工作流：检测与修复公式中 < > 符号的实现步骤"
+                              ],
+                              "tags": [
+                                "doc"
+                              ]
+                            },
+                            "2026-03-17-live-preview-math.md": {
+                              "kind": "file",
+                              "desc": "实时预览实现计划",
+                              "detail": [
+                                "superpowers 工作流：实时预览公式渲染的实现步骤"
+                              ],
+                              "tags": [
+                                "doc"
+                              ]
+                            }
+                          }
+                        },
+                        "specs": {
+                          "kind": "dir",
+                          "desc": "设计规格",
+                          "children": {
+                            "2026-03-17-auto-formatter-design.md": {
+                              "kind": "file",
+                              "desc": "自动格式化设计规格",
+                              "detail": [
+                                "Phase 1.5 自动格式化助手的设计规格"
+                              ],
+                              "tags": [
+                                "doc"
+                              ]
+                            },
+                            "2026-03-17-html-latex-fix-design.md": {
+                              "kind": "file",
+                              "desc": "插件主设计规格",
+                              "detail": [
+                                "核心设计：HTML 标签内公式不渲染的成因与 postProcessor 修复方案"
+                              ],
+                              "tags": [
+                                "doc"
+                              ]
+                            },
+                            "2026-03-17-live-preview-math-design.md": {
+                              "kind": "file",
+                              "desc": "实时预览设计规格",
+                              "detail": [
+                                "Phase 2 实时预览模式的设计规格"
+                              ],
+                              "tags": [
+                                "doc"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "esbuild.config.mjs": {
+                  "kind": "file",
+                  "desc": "esbuild 构建配置",
+                  "detail": [
+                    "开发（watch）与生产两种模式，产出 main.js"
+                  ],
+                  "tags": [
+                    "script"
+                  ]
+                },
+                "manifest.json": {
+                  "kind": "file",
+                  "desc": "Obsidian 插件清单",
+                  "detail": [
+                    "id html-latex-fix，name HTML LaTeX Fix，v0.3.0，minAppVersion 0.15.0"
+                  ]
+                },
+                "memory": {
+                  "kind": "dir",
+                  "desc": "开发记忆",
+                  "children": {
+                    "ROADMAP.md": {
+                      "kind": "file",
+                      "desc": "路线图",
+                      "detail": [
+                        "Phase 2.1 实时预览闪烁问题待解决"
+                      ],
+                      "tags": [
+                        "doc"
+                      ]
+                    }
+                  }
+                },
+                "package-lock.json": {
+                  "kind": "file",
+                  "desc": "依赖锁定文件",
+                  "detail": [
+                    "npm 依赖锁定"
+                  ]
+                },
+                "package.json": {
+                  "kind": "file",
+                  "desc": "包定义与脚本",
+                  "detail": [
+                    "脚本：dev/build/deploy/test/bump:*；test = tsc 类型检查 + scripts/run-tests.mjs"
+                  ]
+                },
+                "README.md": {
+                  "kind": "file",
+                  "desc": "用途、用法与技术栈说明",
+                  "detail": [
+                    "按 monorepo 成员约定编写：用途（修复 HTML 标签内 LaTeX 渲染）、构建/测试/部署命令、文档索引",
+                    "聚合迁入时补写，源项目原缺 README"
+                  ],
+                  "tags": [
+                    "doc"
+                  ]
+                },
+                "scripts": {
+                  "kind": "dir",
+                  "desc": "维护脚本",
+                  "children": {
+                    "run-tests.mjs": {
+                      "kind": "file",
+                      "desc": "测试运行器",
+                      "detail": [
+                        "node 原生测试运行入口，npm test 调用"
+                      ],
+                      "tags": [
+                        "script"
+                      ]
+                    }
+                  }
+                },
+                "src": {
+                  "kind": "dir",
+                  "desc": "插件源码目录",
+                  "detail": [
+                    "TypeScript 源码与样式，按 checker/fixer/live-preview/types/ui 分模块"
+                  ],
+                  "children": {
+                    "__tests__": {
+                      "kind": "dir",
+                      "desc": "契约测试",
+                      "children": {
+                        "formula-checker.test.ts": {
+                          "kind": "file",
+                          "desc": "formula-checker 契约测试",
+                          "detail": [
+                            "核心回归：MIPS 寄存器 $s0 打乱 $ 奇偶配对致标签误替换（2026-08 教材损坏事件）等场景"
+                          ],
+                          "rel": [
+                            "extensions/obsidian/obsidian-html-latex-fix/src/checker/formula-checker.ts"
+                          ],
+                          "tags": [
+                            "test"
+                          ]
+                        }
+                      }
+                    },
+                    "checker": {
+                      "kind": "dir",
+                      "desc": "公式格式检测模块",
+                      "children": {
+                        "formula-checker.ts": {
+                          "kind": "file",
+                          "desc": "公式格式检测器",
+                          "detail": [
+                            "检测 HTML 标签内公式中的裸 < > 符号，基于 findMathMatchesStrict 严格扫描"
+                          ],
+                          "rel": [
+                            "extensions/obsidian/obsidian-html-latex-fix/src/__tests__/formula-checker.test.ts",
+                            "extensions/obsidian/obsidian-html-latex-fix/src/utils.ts"
+                          ]
+                        }
+                      }
+                    },
+                    "fixer": {
+                      "kind": "dir",
+                      "desc": "公式格式修复模块",
+                      "children": {
+                        "formula-fixer.ts": {
+                          "kind": "file",
+                          "desc": "公式格式修复器",
+                          "detail": [
+                            "Editor API 修复公式格式问题，支持撤销"
+                          ]
+                        }
+                      }
+                    },
+                    "live-preview": {
+                      "kind": "dir",
+                      "desc": "实时预览模块（开发中）",
+                      "detail": [
+                        "CodeMirror 6 扩展：编辑视图内渲染 HTML 标签内公式，架构就绪、核心暂缓"
+                      ],
+                      "children": {
+                        "html-math-plugin.ts": {
+                          "kind": "file",
+                          "desc": "ViewPlugin 核心",
+                          "detail": [
+                            "CodeMirror ViewPlugin：识别 HTML 区域并应用公式装饰（暂缓状态含调试日志）"
+                          ]
+                        },
+                        "html-region-finder.ts": {
+                          "kind": "file",
+                          "desc": "HTML 区域识别",
+                          "detail": [
+                            "基于 syntaxTree 识别 HTML 区域并匹配其中公式"
+                          ]
+                        },
+                        "index.ts": {
+                          "kind": "file",
+                          "desc": "live-preview 模块入口",
+                          "detail": [
+                            "导出 CodeMirror 扩展用于实时预览渲染"
+                          ]
+                        },
+                        "math-widget.ts": {
+                          "kind": "file",
+                          "desc": "公式 Widget",
+                          "detail": [
+                            "WidgetType：将 LaTeX 渲染为 CodeMirror Widget"
+                          ]
+                        }
+                      }
+                    },
+                    "main.ts": {
+                      "kind": "file",
+                      "desc": "插件入口",
+                      "detail": [
+                        "Plugin 子类：注册 MarkdownPostProcessor（阅读视图修复）、命令、自动格式化助手与 live-preview 扩展"
+                      ]
+                    },
+                    "math-renderer.ts": {
+                      "kind": "file",
+                      "desc": "公式渲染封装",
+                      "detail": [
+                        "调用 Obsidian renderMath API 渲染 LaTeX"
+                      ]
+                    },
+                    "processor.ts": {
+                      "kind": "file",
+                      "desc": "阅读视图处理核心",
+                      "detail": [
+                        "MarkdownPostProcessor 逻辑：遍历 DOM 树定位 HTML 标签内公式并渲染"
+                      ]
+                    },
+                    "styles.css": {
+                      "kind": "file",
+                      "desc": "自动格式化助手样式",
+                      "detail": [
+                        "通知弹窗等 UI 样式"
+                      ]
+                    },
+                    "types": {
+                      "kind": "dir",
+                      "desc": "类型定义",
+                      "children": {
+                        "problem.ts": {
+                          "kind": "file",
+                          "desc": "公式问题项类型",
+                          "detail": [
+                            "ProblemItem 接口：checker/fixer/UI 间的数据契约"
+                          ]
+                        }
+                      }
+                    },
+                    "ui": {
+                      "kind": "dir",
+                      "desc": "界面组件",
+                      "children": {
+                        "detail-modal.ts": {
+                          "kind": "file",
+                          "desc": "详情弹窗 UI",
+                          "detail": [
+                            "显示所有格式问题详细列表的 Modal"
+                          ]
+                        },
+                        "notice-ui.ts": {
+                          "kind": "file",
+                          "desc": "通知弹窗 UI",
+                          "detail": [
+                            "右下角格式问题提示"
+                          ]
+                        }
+                      }
+                    },
+                    "utils.ts": {
+                      "kind": "file",
+                      "desc": "工具函数与严格扫描",
+                      "detail": [
+                        "正则定义、节点过滤、文本分割",
+                        "findMathMatchesStrict：伪匹配回退 + code 区域过滤 + 块级优先去重"
+                      ],
+                      "rel": [
+                        "extensions/obsidian/obsidian-html-latex-fix/src/checker/formula-checker.ts"
+                      ]
+                    }
+                  }
+                },
+                "tsconfig.json": {
+                  "kind": "file",
+                  "desc": "TypeScript 编译配置",
+                  "detail": [
+                    "tsc -noEmit 类型检查与 esbuild 产物声明配置"
+                  ]
+                },
+                "version-bump.mjs": {
+                  "kind": "file",
+                  "desc": "版本升级脚本",
+                  "detail": [
+                    "支持 patch/minor/major 参数，同步 manifest.json 与 versions.json"
+                  ],
+                  "tags": [
+                    "script"
+                  ]
+                },
+                "versions.json": {
+                  "kind": "file",
+                  "desc": "版本兼容映射",
+                  "detail": [
+                    "插件版本与 minAppVersion 映射表"
+                  ]
+                }
+              }
+            },
             "README.md": {
               "kind": "file",
               "desc": "目录说明：收录范围与约定",

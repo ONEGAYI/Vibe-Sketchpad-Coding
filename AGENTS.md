@@ -17,8 +17,9 @@ Vibe-Sketchpad-Coding/
 ├── CLAUDE.md   # Claude 专属补充规则
 ├── extensions/ # 宿主扩展成员目录
 │   ├── obsidian/ # Obsidian 扩展目录
-│   │   ├── README.md # 目录说明：收录范围与约定
-│   │   └── 目录.md     # 目录索引：本地插件与外部资源
+│   │   ├── obsidian-html-latex-fix/… # HTML 内 LaTeX 渲染修复插件
+│   │   ├── README.md                 # 目录说明：收录范围与约定
+│   │   └── 目录.md                     # 目录索引：本地插件与外部资源
 │   └── README.md # 目录说明：按平台分组约定
 ├── prompts/    # 提示词工具成员目录
 │   └── README.md # 目录说明：收录范围与约定
@@ -47,6 +48,7 @@ Vibe-Sketchpad-Coding/
 - 技能源码统一放 `skills/` 目录，同样一技能一子目录（kebab-case）、自带 `README.md`；入库的是技能快照原样副本
 - 提示词类工具统一放 `prompts/` 目录，一工具一子目录（kebab-case）、自带 `README.md`（与 `skills/` 分工：前者是直接投给对话模型的提示词，后者是 agent 技能）
 - 宿主扩展类工具统一放 `extensions/<平台>/` 目录（如 `extensions/obsidian/`），平台内一扩展一子目录、自带 `README.md`
+- 扩展成员目录在 file-tree 中以 collapsed 折叠渲染进简版树，但内部文件须按顶层收录标准全量登记（desc/detail 齐备），保证 `query` 可查文件职责、`check` 可对照磁盘
 - 本仓库自身的文件树由 `.agents/skills/file-tree/` 技能维护（tree.json 唯一数据源，AGENTS.md 树块为渲染产物禁止手改），维护命令与字段语义见该技能 SKILL.md
 
 ## 提交规范
