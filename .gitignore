@@ -22,6 +22,7 @@ __pycache__/
 Thumbs.db
 desktop.ini
 
-# 编辑器
+# 编辑器与 AI 工具会话目录
 .idea/
 *.swp
+.zcode/
