@@ -493,38 +493,37 @@ class TreeTool:
         dst_key = "/".join(dst_parts)
         if dst_key == src_key:
             raise ToolError(f"源与目标相同: {src}")
-        if _find_node(data["tree"], src_parts) is None:
+        node = _find_node(data["tree"], src_parts)
+        if node is None:
             raise ToolError(f"条目不存在: {src}")
         if len(dst_parts) > len(src_parts) and dst_parts[: len(src_parts)] == src_parts:
             raise ToolError(f"目标不得位于源子树内（先移出再入内）: {src} ⊃ {dst}")
         if _find_node(data["tree"], dst_parts) is not None:
             raise ToolError(f"目标条目已存在（mv 不覆盖，覆盖式更新用 add）: {dst}")
         _, dst_parent = self._resolve_for_write(data, dst)
-        node = _find_node(data["tree"], src_parts)
         # 先挂载后摘除：同父重命名且源是父目录唯一孩子时，先摘会把共同父目录修剪后以空骨架重建、丢失其信息
         dst_parent["children"][dst_parts[-1]] = node
         self._remove_entry(data, src_parts, src)
-        n = self._rewrite_rel(data, src_key, dst_key)
-        # rel 在最终树上统一校验（同 add-batch 收口风格）：重写不应产生悬空，防御性兜底
-        for path, entry in walk_entries(data["tree"], []):
-            if entry.get("rel"):
-                self._validate_rel(data, path, entry["rel"])
-        return n
+        # 不做全树 rel 兜底校验：重写是保存在性映射（旧目标在树中则新目标必在），不引入新悬空；
+        # 反之全量校验会让树上任何既有悬空（rm 的合法产物）阻塞无关的 mv，而 mv 正是修复悬空的手段
+        return self._rewrite_rel(data, src_key, dst_key)
 
     def _rewrite_rel(self, data, old_key, new_key) -> int:
-        """全树把指向 old_key（含以其为前缀的子路径）的 rel 边重写为 new_key，返回重写条数。"""
+        """全树把指向 old_key（含以其为前缀的子路径）的 rel 边重写为 new_key，返回重写的边数。"""
         n = 0
         for _path, node in walk_entries(data["tree"], []):
             rel = node.get("rel")
             if not rel:
                 continue
-            rewritten = [
-                new_key + r[len(old_key):] if r == old_key or r.startswith(old_key + "/") else r
-                for r in rel
-            ]
+            rewritten = []
+            for r in rel:
+                if r == old_key or r.startswith(old_key + "/"):
+                    rewritten.append(new_key + r[len(old_key):])
+                    n += 1
+                else:
+                    rewritten.append(r)
             if rewritten != rel:
                 node["rel"] = rewritten
-                n += 1
         return n
 
     # ---------- 批量（一次变更 = 一步历史，整批原子生效） ----------
@@ -1083,7 +1082,7 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("mv", help="条目带信息迁移（含子树），自动重写指向旧路径的 rel 边；不移动磁盘文件")
     p.add_argument("src", help="原路径")
-    p.add_argument("dst", help="新路径（不得已存在、不得位于源子树内）")
+    p.add_argument("dst", help="新路径（不得为已存在路径、不得位于源子树内）")
 
     p = sub.add_parser("get", help="查看单个条目")
     p.add_argument("path")

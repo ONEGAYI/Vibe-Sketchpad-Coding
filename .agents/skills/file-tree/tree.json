@@ -47,7 +47,7 @@
                       "kind": "file",
                       "desc": "file-tree 唯一维护脚本",
                       "detail": [
-                        "add/rm/query/tag/check/undo/render/root 等全部命令实现"
+                        "add/rm/mv/query/tag/check/undo/render/root 等全部命令实现"
                       ],
                       "rel": [
                         "skills/deploy-file-tree-skill/dist/scripts/tree_tool.py"

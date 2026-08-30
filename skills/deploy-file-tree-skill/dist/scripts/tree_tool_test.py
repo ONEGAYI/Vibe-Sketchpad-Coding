@@ -1007,6 +1007,15 @@ class RmBatchTest(SandboxTest):
 class MvTest(SandboxTest):
     """mv：条目带信息迁移（含子树）——数据层操作不碰磁盘，全树自动重写指向旧路径的 rel 边。"""
 
+    def assert_mv_rejected(self, tool: TreeTool, src: str, dst: str) -> None:
+        """拒绝即原子：tree.json 字节不变，撤销栈与重做栈均空。"""
+        before = tool.tree_json.read_text(encoding="utf-8")
+        with self.assertRaises(ToolError):
+            tool.mv(src, dst)
+        self.assertEqual(tool.tree_json.read_text(encoding="utf-8"), before)
+        undo, redo = tool.history_summary()
+        self.assertEqual((undo, redo), ([], []))
+
     def test_moves_file_with_all_fields(self):
         tool = self.make_tool()
         tool.add("apps/util.ts", rel=["Cargo.toml"])
@@ -1018,6 +1027,7 @@ class MvTest(SandboxTest):
         self.assertEqual(node["rel"], ["Cargo.toml"])  # 指向未移动目标的边不动
         with self.assertRaises(ToolError):
             tool.get("apps/util.ts")
+        self.assertIn("main.tsx", tool.get("apps")["children"])  # 有兄弟则源父目录保留
 
     def test_moves_dir_subtree_intact(self):
         tool = self.make_tool()
@@ -1072,33 +1082,24 @@ class MvTest(SandboxTest):
 
     def test_reject_missing_src_leaves_untouched(self):
         tool = self.make_tool()
-        before = tool.tree_json.read_text(encoding="utf-8")
-        with self.assertRaises(ToolError):
-            tool.mv("nope.rs", "lib/nope.rs")
-        self.assertEqual(tool.tree_json.read_text(encoding="utf-8"), before)
-        undo, _ = tool.history_summary()
-        self.assertEqual(undo, [])
+        self.assert_mv_rejected(tool, "nope.rs", "lib/nope.rs")
 
     def test_reject_existing_dst(self):
         tool = self.make_tool()
-        with self.assertRaises(ToolError):
-            tool.mv("apps/util.ts", "Cargo.toml")
-        with self.assertRaises(ToolError):  # 反斜杠变体归一化后同判
-            tool.mv("apps\\util.ts", "apps\\main.tsx")
+        self.assert_mv_rejected(tool, "apps/util.ts", "Cargo.toml")
+        self.assert_mv_rejected(tool, "apps\\util.ts", "apps\\main.tsx")  # 反斜杠变体归一化后同判
 
     def test_reject_same_src_dst(self):
         tool = self.make_tool()
-        with self.assertRaises(ToolError):
-            tool.mv("apps/util.ts", "apps/util.ts")
+        self.assert_mv_rejected(tool, "apps/util.ts", "apps/util.ts")
+        self.assert_mv_rejected(tool, "apps\\util.ts", "apps//util.ts")  # 分隔符变体归一化后同判
 
     def test_reject_dst_inside_src_subtree(self):
         tool = self.make_tool()
-        with self.assertRaises(ToolError):
-            tool.mv("apps", "apps/sub")
+        self.assert_mv_rejected(tool, "apps", "apps/sub")
         # 粗粒度收录（无 children）时目标在"虚拟子树"下同样拒绝
         coarse = self.make_tool(data={"tags": {}, "tree": {"assets": {"desc": "图标集"}}})
-        with self.assertRaises(ToolError):
-            coarse.mv("assets", "assets/icons")
+        self.assert_mv_rejected(coarse, "assets", "assets/icons")
 
     def test_rename_in_place_keeps_parent_info(self):
         """时序回归：同父重命名且源是父目录唯一孩子，父目录不得被修剪后以空骨架重建。"""
@@ -1131,8 +1132,81 @@ class MvTest(SandboxTest):
 
     def test_reject_dst_mid_path_is_file(self):
         tool = self.make_tool()
+        self.assert_mv_rejected(tool, "apps/util.ts", "Cargo.toml/util.ts")
+
+    def test_moves_dir_keeps_collapsed_flag(self):
+        data = {"tags": {}, "tree": {"legacy": {
+            "desc": "旧模块", "collapsed": True,
+            "children": {"old.rs": {"desc": "旧", "detail": ["x"]}},
+        }}}
+        tool = self.make_tool(data=data)
+        tool.mv("legacy", "archived/legacy")
+        node = tool.get("archived/legacy")
+        self.assertIs(node["collapsed"], True)
+        self.assertIn("old.rs", node["children"])
+
+    def test_moves_file_keeps_hidden_flag(self):
+        data = {"tags": {}, "tree": {"apps": {"desc": "应用层", "children": {
+            "util.ts": {"desc": "工具", "detail": ["纯函数"], "hidden": True}}}}}
+        tool = self.make_tool(data=data)
+        tool.mv("apps/util.ts", "lib/util.ts")
+        self.assertIs(tool.get("lib/util.ts")["hidden"], True)
+        tool.render()
+        self.assertNotIn("工具", tool.agents_md.read_text(encoding="utf-8"))  # 隐藏渲染仍生效
+
+    def test_no_rewrite_on_sibling_prefix(self):
+        """指向兄弟前缀路径（apps2/x）的边不得被裸前缀匹配误伤。"""
+        tool = self.make_tool()
+        tool.add("apps2/x.rs", desc="x", detail=["x"])
+        tool.add("docs/guide.md", desc="指南", detail=["d"], rel=["apps2/x.rs"])
+        tool.mv("apps", "src")
+        self.assertEqual(tool.get("docs/guide.md")["rel"], ["apps2/x.rs"])
+
+    def test_mixed_rel_keeps_misses(self):
+        """命中与未命中混合的 rel 列表：只改命中项，未命中项原样保留。"""
+        tool = self.make_tool()
+        tool.add("docs/guide.md", desc="指南", detail=["d"], rel=["Cargo.toml", "apps/util.ts"])
+        n = tool.mv("apps/util.ts", "lib/util.ts")
+        self.assertEqual(n, 1)
+        self.assertEqual(tool.get("docs/guide.md")["rel"], ["Cargo.toml", "lib/util.ts"])
+
+    def test_returns_edge_count_not_entry_count(self):
+        """n 按重写的边数计（非发生重写的条目数）：单节点两条命中边计 2。"""
+        tool = self.make_tool()
+        tool.add("docs/guide.md", desc="指南", detail=["d"],
+                 rel=["Cargo.toml", "apps/util.ts", "apps/main.tsx"])
+        n = tool.mv("apps", "src")
+        self.assertEqual(n, 2)
+        self.assertEqual(tool.get("docs/guide.md")["rel"], ["Cargo.toml", "src/main.tsx", "src/util.ts"])
+
+    def test_mv_not_blocked_by_preexisting_dangling_rel(self):
+        """既有悬空 rel（rm 的合法产物）不阻塞无关 mv——mv 正是修复悬空的手段。"""
+        tool = self.make_tool()
+        tool.add("apps/tmp.rs", desc="t", detail=["t"])
+        tool.add("docs/guide.md", desc="指南", detail=["d"], rel=["apps/tmp.rs"])
+        tool.rm("apps/tmp.rs")  # rm 不重写 rel，guide.md 的边悬空
+        tool.mv("Cargo.toml", "Cargo.lock")
+        self.assertEqual(tool.get("docs/guide.md")["rel"], ["apps/tmp.rs"])  # 悬空边原样留给 check 报告
+
+    def test_mv_leaves_disk_files_alone(self):
+        """数据层迁移不碰磁盘：真实文件留在原位，新路径不产生文件。"""
+        tool = self.make_tool()
+        src_file = tool.repo_root / "apps" / "util.ts"
+        src_file.parent.mkdir(parents=True, exist_ok=True)
+        src_file.write_text("x", encoding="utf-8")
+        tool.mv("apps/util.ts", "lib/util.ts")
+        self.assertTrue(src_file.exists())
+        self.assertFalse((tool.repo_root / "lib" / "util.ts").exists())
+
+    def test_redo_restores_move(self):
+        tool = self.make_tool()
+        tool.mv("apps/util.ts", "lib/util.ts")
+        tool.undo()
+        op = tool.redo()
+        self.assertEqual(op, "mv apps/util.ts -> lib/util.ts")
+        self.assertEqual(tool.get("lib/util.ts")["desc"], "工具")
         with self.assertRaises(ToolError):
-            tool.mv("apps/util.ts", "Cargo.toml/util.ts")
+            tool.get("apps/util.ts")
 
     def test_top_level_rename(self):
         tool = self.make_tool()
@@ -1152,6 +1226,19 @@ class CmdMvTest(SandboxTest):
         self.assertEqual(tool.get("lib/util.ts")["desc"], "工具")
         text = tool.agents_md.read_text(encoding="utf-8")
         self.assertIn("lib/", text)  # 简版树为多行树形，目录与文件名分行渲染
+        self.assertIn("工具", text)
+
+    def test_cmd_mv_reports_rewrite_count(self):
+        import io
+        import types
+        from contextlib import redirect_stdout
+
+        tool = self.make_tool()
+        tool.add("docs/guide.md", desc="指南", detail=["d"], rel=["apps/util.ts"])
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _cmd_mv(tool, types.SimpleNamespace(src="apps/util.ts", dst="lib/util.ts"))
+        self.assertIn("已迁移并重渲染: apps/util.ts -> lib/util.ts（重写 1 条 rel 边）", buf.getvalue())
 
 
 class CmdBatchTest(SandboxTest):
