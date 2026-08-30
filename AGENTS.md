@@ -18,7 +18,7 @@ Vibe-Sketchpad-Coding/
 ├── extensions/ # 宿主扩展成员目录
 │   ├── obsidian/ # Obsidian 扩展目录
 │   │   ├── README.md # 目录说明：收录范围与约定
-│   │   └── 外源性资源.md  # 外源性资源清单：本人仓库与插件推荐
+│   │   └── 目录.md     # 目录索引：本地插件与外部资源
 │   └── README.md # 目录说明：按平台分组约定
 ├── prompts/    # 提示词工具成员目录
 │   └── README.md # 目录说明：收录范围与约定
