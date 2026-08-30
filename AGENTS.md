@@ -28,6 +28,7 @@ Vibe-Sketchpad-Coding/
 │   │   ├── 搜索策略.md       # 片段：主动搜索触发条件
 │   │   └── 表达规范.md       # 片段：技术写作五原则
 │   └── README.md # 目录说明：收录范围与约定
+├── README.md   # 仓库说明：简介与一级目录结构
 └── skills/     # 技能源码成员目录
     ├── accelerated-learning/…   # 教师式学习技能母体
     ├── deploy-file-tree-skill/… # file-tree 部署器母体

@@ -643,6 +643,16 @@
         }
       }
     },
+    "README.md": {
+      "kind": "file",
+      "desc": "仓库说明：简介与一级目录结构",
+      "detail": [
+        "monorepo 简介、主要一级目录文件树（粗粒度，完整树以 AGENTS.md 渲染块为准）、目录职责、收录约定"
+      ],
+      "tags": [
+        "doc"
+      ]
+    },
     "skills": {
       "kind": "dir",
       "desc": "技能源码成员目录",
