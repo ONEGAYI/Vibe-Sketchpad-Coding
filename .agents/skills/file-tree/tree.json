@@ -830,6 +830,16 @@
               ]
             }
           }
+        },
+        "README.md": {
+          "kind": "file",
+          "desc": "目录说明：收录范围与约定",
+          "detail": [
+            "一技能一子目录（kebab-case）自带 README；入库为母体快照，~/.agents/skills/ 为本机使用副本；与 prompts/ 的分工"
+          ],
+          "tags": [
+            "doc"
+          ]
         }
       }
     }

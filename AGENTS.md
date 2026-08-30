@@ -30,7 +30,8 @@ Vibe-Sketchpad-Coding/
 │   └── README.md # 目录说明：收录范围与约定
 └── skills/     # 技能源码成员目录
     ├── accelerated-learning/…   # 教师式学习技能母体
-    └── deploy-file-tree-skill/… # file-tree 部署器母体
+    ├── deploy-file-tree-skill/… # file-tree 部署器母体
+    └── README.md                # 目录说明：收录范围与约定
 <!-- file-tree:tree:end -->
 ```
 
