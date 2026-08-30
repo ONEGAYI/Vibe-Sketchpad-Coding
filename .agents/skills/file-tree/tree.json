@@ -127,6 +127,55 @@
         "通过 @AGENTS.md 导入主文件，仅附加 Claude 专属补充"
       ]
     },
+    "extensions": {
+      "kind": "dir",
+      "desc": "宿主扩展成员目录",
+      "detail": [
+        "按宿主平台分组（如 obsidian/），每平台一子目录"
+      ],
+      "children": {
+        "obsidian": {
+          "kind": "dir",
+          "desc": "Obsidian 扩展目录",
+          "detail": [
+            "面向 Obsidian 的扩展类小工具（插件、脚本、CSS snippet 等）"
+          ],
+          "children": {
+            "README.md": {
+              "kind": "file",
+              "desc": "目录说明：收录范围与约定",
+              "detail": [
+                "一工具一子目录（kebab-case）、自带 README"
+              ]
+            }
+          }
+        },
+        "README.md": {
+          "kind": "file",
+          "desc": "目录说明：按平台分组约定",
+          "detail": [
+            "每平台一子目录，平台内每扩展工具再占一子目录"
+          ]
+        }
+      }
+    },
+    "prompts": {
+      "kind": "dir",
+      "desc": "提示词工具成员目录",
+      "detail": [
+        "收录直接投给对话模型使用的提示词模板与工具",
+        "与 skills/ 分工：skills/ 收录 agent 技能，本目录收录提示词"
+      ],
+      "children": {
+        "README.md": {
+          "kind": "file",
+          "desc": "目录说明：收录范围与约定",
+          "detail": [
+            "一工具一子目录（kebab-case）、自带 README、与 skills/ 的分工"
+          ]
+        }
+      }
+    },
     "skills": {
       "kind": "dir",
       "desc": "技能源码成员目录",
