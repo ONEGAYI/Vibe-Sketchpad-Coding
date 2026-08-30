@@ -17,7 +17,8 @@ Vibe-Sketchpad-Coding/
 ├── CLAUDE.md   # Claude 专属补充规则
 ├── extensions/ # 宿主扩展成员目录
 │   ├── obsidian/ # Obsidian 扩展目录
-│   │   └── README.md # 目录说明：收录范围与约定
+│   │   ├── README.md # 目录说明：收录范围与约定
+│   │   └── 外源性资源.md  # 外源性资源清单：本人仓库与插件推荐
 │   └── README.md # 目录说明：按平台分组约定
 ├── prompts/    # 提示词工具成员目录
 │   └── README.md # 目录说明：收录范围与约定
