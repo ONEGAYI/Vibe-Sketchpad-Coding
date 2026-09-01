@@ -180,7 +180,7 @@ def main(argv=None) -> int:
             log = deploy(args.target, skill_rel=args.skill_dir)
         else:
             log = update_dist(args.source, source_rel=args.source_dir)
-    except ft.ToolError as exc:
+    except DeployError as exc:  # deploy/update_dist 已把 ToolError 统一包装为 DeployError
         print(f"错误: {exc}", file=sys.stderr)
         return 2
     for line in log:
