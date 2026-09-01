@@ -131,6 +131,28 @@ class DeployTest(unittest.TestCase):
         with self.assertRaises(deploy.DeployError):
             run_deploy(Path(tempfile.gettempdir()) / "no-such-dir-xyz")
 
+    def test_main_unhealthy_target_reports_readable_error(self):
+        # 目标仓存量数据不健康（自检失败）→ main 应打印可读错误并返回 2，
+        # 而非在 except 求值时 NameError 崩溃、掩盖真实错误（曾发生于 Semitronix 升级）
+        import contextlib
+        import io
+
+        target = self.make_target()
+        run_deploy(target)
+        skill = target / ".agents/skills/file-tree"
+        ft = deploy.load_tree_tool()
+        data = {"tags": {}, "tree": {"a.rs": {
+            "kind": "file", "desc": "甲", "detail": ["甲文件"], "rel": ["gone.rs"],
+        }}}
+        (skill / "tree.json").write_text(
+            ft.dumps_canonical(ft.normalize_data(data)), encoding="utf-8", newline="\n"
+        )  # 规范形态 + 悬空 rel：迁移不碰语义，check 必报错
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = deploy.main(["deploy", str(target)])
+        self.assertEqual(code, 2)
+        self.assertIn("错误", err.getvalue())
+
     def test_deploy_requires_complete_dist(self):
         target = self.make_target()
         with tempfile.TemporaryDirectory() as tmp:
