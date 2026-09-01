@@ -55,6 +55,7 @@ python ~/.agents/skills/deploy-file-tree-skill/scripts/deploy.py update-dist <�
 ## 部署后引导（转告目标仓库的使用者）
 
 - 录入条目：`python .agents/skills/file-tree/scripts/tree_tool.py add <path> -d "一句话" --detail "完整描述"`
+- 录入目录（整目录粗粒度收录）：同命令加 `--dir`，批量清单条目写 `"dir": true`；磁盘目录未声明时脚本也会自动识别并提示
 - 全量校验：`... check --strict`（新仓库会提示 git 文件未收录，属正常，逐条 add 即可）
 - 撤销误操作：`... undo` / `redo` / `history`
 
