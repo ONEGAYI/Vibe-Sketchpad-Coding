@@ -1,7 +1,7 @@
 """file-tree 技能：项目文件树唯一维护入口。
 
 数据源 tree.json：顶层 {tags, tree}，tree 嵌套 = 目录嵌套（有 children 键即目录）。
-条目字段固定顺序 kind / desc / detail / rel / tags / collapsed / hidden / children；
+条目字段固定顺序 kind / desc / detail / rel / tags / collapsed / hidden / git-ignore / children；
 kind 由 children 判据推导（"file"/"dir"），规范化时无条件落盘供机器消费，
 不参与渲染、手改会被纠正；本脚本是唯一写入口，所有写命令执行后自动按
 确定性字典序（casefold + 码点决胜）规范化并重渲染产物。
@@ -12,22 +12,34 @@ AGENTS.md 不存在则生成最小骨架。detail 完整描述只存于 tree.jso
 不渲染。渲染控制字段只影响 AGENTS.md 简版树：目录 collapsed=true 折叠
 （目录行带 … 不展开 children）；条目 hidden=true 整体隐藏（含子树）；
 两者默认 false（不落盘），数据、查询与 check 校验始终全量不受影响。
+校验控制字段 git-ignore=true 则豁免"必须被 git 跟踪"的对照（收录 .gitignore
+排除的本地文件，如大体积产物）：check 只校验磁盘存在，并要求确实排除在
+git 之外（未被跟踪且被 ignore 规则覆盖，二者违反其一均报错）。继承为就近
+覆写：有效值取沿祖先链（含自身）最近一次显式设置，显式 false 可让子条目/
+子树退出祖先豁免（true/false 均落盘，缺省不落盘 = 继承），数据、查询与
+渲染不受影响。
 仓库内其他手写文件树惰性对待：以本技能 tree.json 的查询结果为准，
 不主动同步维护它们。
 
 用法：
   python tree_tool.py add <path> -d 描述 [--detail 行]... [--rel 路径]... [--tags a,b] [--dir]
                          [--collapsed|--no-collapsed] [--hidden|--no-hidden]
+                         [--git-ignore|--no-git-ignore]
+  python tree_tool.py add-batch <manifest.json>
   python tree_tool.py rm <path>
+  python tree_tool.py rm-batch <path>...
   python tree_tool.py mv <src> <dst>
   python tree_tool.py mv-batch <manifest.json>
-  python tree_tool.py get <path>
-  python tree_tool.py query [--kw 关键词] [--tag 标签] [--rel-of 路径] [--json]
+  python tree_tool.py get <path>...             # 查看条目（可多路径批量）
+  python tree_tool.py query [--kw 关键词] [--tag 标签] [--rel-of 路径] [--under 目录] [--depth N] [--json]
+  python tree_tool.py mark <dir> [--tags a,b] [--tags-mode add|replace]
+                         [--git-ignore|--no-git-ignore] [--depth N]
   python tree_tool.py tag-add <名> -d 说明
   python tree_tool.py tag-rm <名>
   python tree_tool.py undo | redo | history
   python tree_tool.py check [--strict]
   python tree_tool.py render
+  python tree_tool.py root [<名>|--clear]
 
 撤销历史（默认 20 步）存放于 git 私有区 <gitdir>/file-tree/history.json：
 不被 git 追踪、不入库、clone 不携带；非 git 仓库退化为技能目录 .history.json。
@@ -44,7 +56,7 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = SKILL_DIR.parents[2]
 
-FIELD_ORDER = ["kind", "desc", "detail", "rel", "tags", "collapsed", "hidden", "children"]
+FIELD_ORDER = ["kind", "desc", "detail", "rel", "tags", "collapsed", "hidden", "git-ignore", "children"]
 
 TREE_BEGIN = "<!-- file-tree:tree:begin 由脚本渲染，禁止手改 -->"
 TREE_END = "<!-- file-tree:tree:end -->"
@@ -138,6 +150,10 @@ def _normalize_node(node: dict) -> dict:
                 raise ToolError(f"{field} 必须是布尔值: {value!r}")
             if value:
                 out[field] = True  # false 为默认值，不落盘
+        elif field == "git-ignore":
+            if not isinstance(value, bool):
+                raise ToolError(f"git-ignore 必须是布尔值: {value!r}")
+            out["git-ignore"] = value  # 三态：键在即显式设置（false 覆写祖先豁免），缺省不落盘 = 继承
         elif field == "children":
             if not isinstance(value, dict):
                 raise ToolError(f"children 必须是对象: {value!r}")
@@ -286,6 +302,7 @@ class TreeTool:
         self.history_limit = history_limit
         self.legacy_history_paths = legacy_history_paths  # 历史旧位置（如 git 初始化前的退化位置），保存时收敛删除
         self.git_files_override: set[str] | None = None
+        self.git_tracked_override: set[str] | None = None
 
     # ---------- 数据读写（唯一写入口） ----------
 
@@ -399,7 +416,7 @@ class TreeTool:
             node = child
         return parts, node
 
-    def _apply_add(self, data, path, desc=None, detail=None, rel=None, tags=None, is_dir_entry=False, collapsed=None, hidden=None) -> str | None:
+    def _apply_add(self, data, path, desc=None, detail=None, rel=None, tags=None, is_dir_entry=False, collapsed=None, hidden=None, git_ignore=None) -> str | None:
         """在内存 data 上应用单条 add 的校验与变换（不校验 rel、不落盘）。
 
         新建条目未声明目录而磁盘上是目录时自动收录为目录条目并返回提示文案；
@@ -444,6 +461,8 @@ class TreeTool:
                 node["hidden"] = True
             else:
                 node.pop("hidden", None)
+        if git_ignore is not None:
+            node["git-ignore"] = git_ignore  # 显式 false 也落盘：就近覆写祖先豁免（三态语义见 normalize）
         return note
 
     def _validate_rel(self, data, path, rel) -> None:
@@ -457,12 +476,12 @@ class TreeTool:
             if _find_node(data["tree"], parts_r) is None:
                 raise ToolError(f"rel 目标不在树中（先 add 目标或修正路径）: {r}")
 
-    def add(self, path, desc=None, detail=None, rel=None, tags=None, is_dir_entry=False, collapsed=None, hidden=None) -> None:
+    def add(self, path, desc=None, detail=None, rel=None, tags=None, is_dir_entry=False, collapsed=None, hidden=None, git_ignore=None) -> None:
         data = self.load()
         if rel:
             self._validate_rel(data, path, rel)
         note = self._apply_add(data, path, desc=desc, detail=detail, rel=rel, tags=tags,
-                               is_dir_entry=is_dir_entry, collapsed=collapsed, hidden=hidden)
+                               is_dir_entry=is_dir_entry, collapsed=collapsed, hidden=hidden, git_ignore=git_ignore)
         self._record_undo(f"add {path}")
         self.write_data(data)
         if note:
@@ -542,7 +561,7 @@ class TreeTool:
 
     # ---------- 批量（一次变更 = 一步历史，整批原子生效） ----------
 
-    BATCH_ENTRY_FIELDS = frozenset({"path", "desc", "detail", "rel", "tags", "dir", "collapsed", "hidden"})
+    BATCH_ENTRY_FIELDS = frozenset({"path", "desc", "detail", "rel", "tags", "dir", "collapsed", "hidden", "git-ignore"})
 
     def _normalize_batch_entry(self, idx: int, entry) -> dict:
         """清单条目 → _apply_add 参数：字段全可选（语义同单条 add），类型不符即拒绝。"""
@@ -574,11 +593,12 @@ class TreeTool:
         spec = {"path": path, "desc": desc, "detail": opt_list("detail"), "rel": opt_list("rel"),
                 "tags": opt_list("tags"), "is_dir_entry": is_dir_entry,
                 "collapsed": None, "hidden": None}
-        for field in ("collapsed", "hidden"):
+        for field in ("collapsed", "hidden", "git-ignore"):
             val = entry.get(field)
             if val is not None and not isinstance(val, bool):
                 raise ToolError(f"add-batch 条目 {path} 的 {field} 须为布尔")
-            spec[field] = val
+            # JSON 键 "git-ignore" 映射为参数名 git_ignore（连字符不是合法标识符）
+            spec["git_ignore" if field == "git-ignore" else field] = val
         return spec
 
     def add_batch(self, entries) -> int:
@@ -692,6 +712,69 @@ class TreeTool:
         self.write_data(data)
         return len(specs), edges
 
+    # ---------- 子树批量标记 ----------
+
+    def mark(self, dir_path, tags=None, tags_mode="add", git_ignore=None, depth=None) -> tuple[int, int, int]:
+        """子树批量标记（一次变更单步历史）：tags 作用于子树全部条目（含目录），
+        git-ignore 仅落文件条目且只给"未表态"者表态——显式设置（true/false）是个体
+        意图不覆写；true 方向还跳过 git 已跟踪文件（落 true 即矛盾标记，check 必报），
+        false 方向不跳（tracked 文件落显式 false 恰是退出祖先豁免的修复动作）。
+
+        tags add=并集、replace=整体替换（空列表=清空）；depth 为相对锚点层数上限
+        （1=直接子级），缺省全深度。目录条目不落 git-ignore——就近覆写继承下目录
+        标记会穿透 depth 限制。返回 (tags 受影响条数, git-ignore 受影响条数, 跳过条数)；
+        锚点自身与子树外条目不动。
+        """
+        if tags is None and git_ignore is None:
+            raise ToolError("至少给一个动作参数（--tags 或 --git-ignore）")
+        if tags_mode not in ("add", "replace"):
+            raise ToolError(f"tags-mode 须为 add 或 replace: {tags_mode}")
+        if depth is not None and depth < 1:
+            raise ToolError(f"depth 必须是正整数: {depth}")
+        parts = split_rel_path(dir_path)
+        data = self.load()
+        anchor = _find_node(data["tree"], parts)
+        if anchor is None or not is_dir(anchor):
+            raise ToolError(f"锚点不是树中目录条目: {dir_path}")
+        if not anchor["children"]:
+            raise ToolError(f"目录未展开 children（粗粒度收录），无可传播条目: {dir_path}")
+        if tags:
+            vocab = set(data.get("tags", {}))
+            unknown = [t for t in tags if t not in vocab]
+            if unknown:
+                raise ToolError(f"未知标签 {unknown}，先 tag-add 登记再使用")
+        tracked = self._git_tracked() if git_ignore else None  # 仅 true 方向需要；不可用时无从跳过
+        n_tags = n_git = n_skip = 0
+
+        def apply(children: dict, prefix: list[str], rel_depth: int) -> None:
+            nonlocal n_tags, n_git, n_skip
+            if depth is not None and rel_depth > depth:
+                return  # 剪枝：超出限定深度不再下探
+            for name, child in children.items():
+                if tags is not None:
+                    old = child.get("tags", [])
+                    if tags_mode == "add":
+                        new = sorted(set(old) | set(tags), key=sort_key)
+                    else:
+                        new = sorted(set(tags), key=sort_key)
+                    if new != old:
+                        child["tags"] = new  # 空列表由 write_data 规范化移除键
+                        n_tags += 1
+                if git_ignore is not None and not is_dir(child):
+                    path = "/".join(prefix + [name])
+                    if "git-ignore" in child or (tracked is not None and git_ignore and path in tracked):
+                        n_skip += 1  # 显式设置是个体表态不覆写；true 不落 tracked 文件
+                    else:
+                        child["git-ignore"] = git_ignore
+                        n_git += 1
+                if is_dir(child) and child["children"]:
+                    apply(child["children"], prefix + [name], rel_depth + 1)
+
+        apply(anchor["children"], parts, 1)
+        self._record_undo(f"mark {dir_path}")
+        self.write_data(data)
+        return n_tags, n_git, n_skip
+
     # ---------- 词表 ----------
 
     def tag_add(self, name: str, desc: str) -> None:
@@ -742,10 +825,28 @@ class TreeTool:
 
     # ---------- 查询 ----------
 
-    def query(self, kw=None, tag=None, rel_of=None) -> list[tuple[str, dict]]:
+    def query(self, kw=None, tag=None, rel_of=None, under=None, depth=None) -> list[tuple[str, dict]]:
+        """组合过滤。under 限定目录子树（锚点自身含入）；depth 为相对锚点层数上限，
+        须与 under 同用——两者共同实现"这块目录前几层"的批量查询。"""
         data = self.load()
+        under_parts: list[str] | None = None
+        if under is not None:
+            under_parts = split_rel_path(under)
+            anchor = _find_node(data["tree"], under_parts)
+            if anchor is None or not is_dir(anchor):
+                raise ToolError(f"--under 不是树中目录条目: {under}")
+        if depth is not None:
+            if under_parts is None:
+                raise ToolError("--depth 须与 --under 同用（限定目录子树的相对层数）")
+            if depth < 1:
+                raise ToolError(f"--depth 必须是正整数: {depth}")
         results = []
         for path, node in walk_entries(data["tree"], []):
+            parts = path.split("/")
+            if under_parts is not None and parts[: len(under_parts)] != under_parts:
+                continue
+            if depth is not None and len(parts) - len(under_parts) > depth:
+                continue
             if kw is not None:
                 haystack = " ".join(
                     [path, node.get("desc", ""), " ".join(node.get("detail", []))]
@@ -823,6 +924,38 @@ class TreeTool:
             return None
         return {line for line in proc.stdout.splitlines() if line.strip()}
 
+    def _git_tracked(self) -> set[str] | None:
+        """git 已跟踪集合（ls-files --cached）：git-ignore 豁免条目的排除态校验基准。"""
+        if self.git_tracked_override is not None:
+            return self.git_tracked_override
+        if not (self.repo_root / ".git").exists():
+            return None
+        proc = subprocess.run(
+            ["git", "-c", "core.quotepath=off", "ls-files", "--cached"],
+            cwd=self.repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        if proc.returncode != 0:
+            return None
+        return {line for line in proc.stdout.splitlines() if line.strip()}
+
+    def _git_exempt(self, tree: dict, path: str) -> bool:
+        """path 的 git-ignore 有效值：就近覆写——沿祖先链（含自身）最近一次显式设置生效，均缺省则不豁免。"""
+        value = False
+        cursor: dict = {"children": tree}
+        for part in split_rel_path(path):
+            if not is_dir(cursor):
+                break  # 中途段是文件条目：无更深的祖先设置可继承（与 _find_node 同防御）
+            child = cursor["children"].get(part)
+            if child is None:
+                break
+            if "git-ignore" in child:
+                value = child["git-ignore"]
+            cursor = child
+        return value
+
     def _is_skill_pycache(self, path: str) -> bool:
         """技能目录内的 __pycache__（契约测试运行产物）：运行时缓存，豁免未收录告警。"""
         try:
@@ -891,7 +1024,9 @@ class TreeTool:
         if git_files is None:
             pass  # 非 git 环境静默跳过磁盘对照，由 CLI 层提示
         else:
-            for missing in sorted(file_paths - git_files, key=sort_key):
+            tracked = self._git_tracked()  # tracked ⊆ git_files；None = git 不可用，豁免条目退化为仅校验磁盘存在
+            exempt = {p for p in file_paths if self._git_exempt(tree, p)}
+            for missing in sorted(file_paths - git_files - exempt, key=sort_key):
                 disk = self.repo_root.joinpath(*split_rel_path(missing))
                 if disk.is_dir():
                     # git ls-files 只列文件不列目录：此实况是类型错配而非路径悬空
@@ -900,6 +1035,20 @@ class TreeTool:
                     errors.append(f"E: 树中条目未被 git 跟踪: {missing}")
                 else:
                     errors.append(f"E: 树中条目未被 git 跟踪且磁盘不存在: {missing}")
+
+            # git-ignore 豁免条目：只校验磁盘存在，并要求确实排除在 git 之外。
+            # 排除态矛盾（被跟踪）不会进上面的差集循环——tracked ⊆ git_files——必须在此单独拦截
+            for p in sorted(exempt, key=sort_key):
+                disk = self.repo_root.joinpath(*split_rel_path(p))
+                if disk.is_dir():
+                    errors.append(f'E: {p} 磁盘上是目录，树中却是文件条目（add --dir 或清单 "dir": true 修正）')
+                elif not disk.exists():
+                    errors.append(f"E: {p} git-ignore 条目磁盘不存在")
+                elif tracked is not None and p in tracked:
+                    errors.append(f"E: {p} 标记 git-ignore 但实际被 git 跟踪（git rm --cached 或移除标记恢复对照）")
+                elif tracked is not None and p in git_files:
+                    # 在 git_files 又不在 tracked = 未跟踪且未被 ignore：git status 会持续显示 untracked
+                    errors.append(f"E: {p} 标记 git-ignore 但未被 .gitignore 排除（补 ignore 规则或移除标记）")
 
             def reported_if(f: str) -> bool:
                 """祖先整目录收录（在树中但未展开）则不报，否则报未收录。"""
@@ -967,6 +1116,7 @@ def _cmd_add(tool: TreeTool, args) -> None:
         is_dir_entry=args.dir,
         collapsed=args.collapsed,
         hidden=args.hidden,
+        git_ignore=args.git_ignore,
     )
     tool.render()
     print(f"已写入并重渲染: {args.path}")
@@ -1046,30 +1196,55 @@ def _cmd_root(tool: TreeTool, args) -> None:
 
 
 def _cmd_get(tool: TreeTool, args) -> None:
-    node = tool.get(args.path)
-    print(args.path)
-    print(f"  类型: {'目录' if is_dir(node) else '文件'}")
-    if node.get("collapsed"):
-        print("  collapsed: true（简版树折叠渲染，不展开 children）")
-    if node.get("hidden"):
-        print("  hidden: true（简版树隐藏渲染，条目及子树不出现）")
-    print(f"  desc: {node.get('desc', '')}")
-    if node.get("detail"):
-        print("  detail:")
-        for line in node["detail"]:
-            print(f"    - {line}")
-    if node.get("rel"):
-        print("  rel:")
-        for ref in node["rel"]:
-            print(f"    - {ref}")
     vocab = tool.load().get("tags", {})
-    if node.get("tags"):
-        rendered = ", ".join(f"{t}（{vocab.get(t, '?')}）" for t in node["tags"])
-        print(f"  tags: {rendered}")
+    for i, path in enumerate(args.path):
+        if i:
+            print()  # 多路径条间空行分隔；单路径输出与历史格式一致
+        node = tool.get(path)
+        print(path)
+        print(f"  类型: {'目录' if is_dir(node) else '文件'}")
+        if node.get("collapsed"):
+            print("  collapsed: true（简版树折叠渲染，不展开 children）")
+        if node.get("hidden"):
+            print("  hidden: true（简版树隐藏渲染，条目及子树不出现）")
+        if "git-ignore" in node:
+            if node["git-ignore"]:
+                print("  git-ignore: true（豁免 git 跟踪对照，check 只校验磁盘存在与 git 排除态；子树未覆写则继承）")
+            else:
+                print("  git-ignore: false（显式退出祖先豁免，check 恢复必须被 git 跟踪的对照；子树未覆写则同样退出）")
+        print(f"  desc: {node.get('desc', '')}")
+        if node.get("detail"):
+            print("  detail:")
+            for line in node["detail"]:
+                print(f"    - {line}")
+        if node.get("rel"):
+            print("  rel:")
+            for ref in node["rel"]:
+                print(f"    - {ref}")
+        if node.get("tags"):
+            rendered = ", ".join(f"{t}（{vocab.get(t, '?')}）" for t in node["tags"])
+            print(f"  tags: {rendered}")
+
+
+def _cmd_mark(tool: TreeTool, args) -> None:
+    # --tags "" 是显式空列表（配合 replace 清空），不折算为 None；缺省（不给参数）才是"不动"
+    tags = None if args.tags is None else [t.strip() for t in args.tags.split(",") if t.strip()]
+    n_tags, n_git, n_skip = tool.mark(
+        args.path,
+        tags=tags,
+        tags_mode=args.tags_mode,
+        git_ignore=args.git_ignore,
+        depth=args.depth,
+    )
+    tool.render()
+    # 跳过原因按方向表述：false 方向不跳 tracked（tracked 落显式 false 是修复动作），只剩显式设置一类
+    reason = "显式设置/git 已跟踪不覆写" if args.git_ignore else "显式设置不覆写"
+    skip_note = f"，跳过 {n_skip} 条（{reason}）" if n_skip else ""
+    print(f"已批量标记并重渲染: {args.path}（tags {n_tags} 条，git-ignore {n_git} 条{skip_note}；一次变更，单步历史）")
 
 
 def _cmd_query(tool: TreeTool, args) -> None:
-    results = tool.query(kw=args.kw, tag=args.tag, rel_of=args.rel_of)
+    results = tool.query(kw=args.kw, tag=args.tag, rel_of=args.rel_of, under=args.under, depth=args.depth)
     if args.json:
         payload = [
             {
@@ -1081,6 +1256,8 @@ def _cmd_query(tool: TreeTool, args) -> None:
                 "tags": node.get("tags", []),
                 "collapsed": node.get("collapsed", False),
                 "hidden": node.get("hidden", False),
+                # git-ignore 是三态字段：null=缺省（继承祖先），false=显式退出豁免——二态默认值会把两者拍平
+                "git-ignore": node.get("git-ignore"),
             }
             for path, node in results
         ]
@@ -1171,6 +1348,12 @@ def main(argv=None) -> int:
         action=argparse.BooleanOptionalAction,
         help="隐藏渲染（简版树中条目及子树不出现），--no-hidden 取消",
     )
+    p.add_argument(
+        "--git-ignore",
+        dest="git_ignore",
+        action=argparse.BooleanOptionalAction,
+        help="豁免 git 跟踪对照（收录 .gitignore 排除的本地大文件等），check 改为校验磁盘存在与 git 排除态；目录标记子树继承，--no-git-ignore 取消",
+    )
 
     p = sub.add_parser("add-batch", help="批量新增/更新（JSON 清单）：一次变更单步历史，任一条非法整批拒绝")
     p.add_argument("manifest", help='清单 JSON 路径，顶层为 {"entries": [{"path": "a.ts", "desc": "简介"}, ...]}')
@@ -1188,14 +1371,28 @@ def main(argv=None) -> int:
     p = sub.add_parser("mv-batch", help="批量迁移（JSON 清单）：一次变更单步历史；批内 src/dst 互斥预校验，任一条非法整批拒绝")
     p.add_argument("manifest", help='清单 JSON 路径，顶层为 {"moves": [{"src": "a.ts", "dst": "b/a.ts"}, ...]}')
 
-    p = sub.add_parser("get", help="查看单个条目")
-    p.add_argument("path")
+    p = sub.add_parser("get", help="查看条目（可给多个路径批量查看）")
+    p.add_argument("path", nargs="+", help="仓库相对路径，可多个")
 
     p = sub.add_parser("query", help="组合查询")
     p.add_argument("--kw", help="关键词（匹配路径/desc/detail）")
     p.add_argument("--tag", help="标签过滤")
     p.add_argument("--rel-of", dest="rel_of", help="反查：谁关联到此路径")
+    p.add_argument("--under", help="限定目录子树（锚点自身含入；须为树中目录条目）")
+    p.add_argument("--depth", type=int, help="相对 --under 的层数上限（1=直接子级）；须与 --under 同用")
     p.add_argument("--json", action="store_true", help="机器可读输出")
+
+    p = sub.add_parser("mark", help="子树批量标记：tags 追加/覆写与 git-ignore 传播到目录子树（可限深度）")
+    p.add_argument("path", help="树中已展开 children 的目录条目（锚点自身不动）")
+    p.add_argument("--tags", help='逗号分隔标签；空串 "" 配 --tags-mode replace 表示清空')
+    p.add_argument("--tags-mode", choices=["add", "replace"], default="add", help="add=并集追加（默认），replace=整体替换")
+    p.add_argument(
+        "--git-ignore",
+        dest="git_ignore",
+        action=argparse.BooleanOptionalAction,
+        help="传播到子树文件条目（目录不落标记，防继承穿透 depth）；--no-git-ignore 落盘显式 false（批量退出豁免）",
+    )
+    p.add_argument("--depth", type=int, help="相对锚点层数上限（1=直接子级），缺省全深度")
 
     p = sub.add_parser("tag-add", help="登记受控标签")
     p.add_argument("name")
@@ -1235,6 +1432,7 @@ def main(argv=None) -> int:
         "mv-batch": _cmd_mv_batch,
         "get": _cmd_get,
         "query": _cmd_query,
+        "mark": _cmd_mark,
         "tag-add": _cmd_tag_add,
         "tag-rm": _cmd_tag_rm,
         "undo": _cmd_undo,

@@ -19,6 +19,8 @@ from tree_tool import (  # noqa: E402
     TreeTool,
     _cmd_add,
     _cmd_add_batch,
+    _cmd_get,
+    _cmd_mark,
     _cmd_mv,
     _cmd_mv_batch,
     _cmd_query,
@@ -54,7 +56,13 @@ def make_data() -> dict:
 class SandboxTest(unittest.TestCase):
     """基类：为每个用例搭临时沙箱并返回配置好的 TreeTool。"""
 
-    def make_tool(self, data: dict | None = None, git_files: set[str] | None = None, history_limit: int = 20) -> TreeTool:
+    def make_tool(
+        self,
+        data: dict | None = None,
+        git_files: set[str] | None = None,
+        tracked_files: set[str] | None = None,
+        history_limit: int = 20,
+    ) -> TreeTool:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
@@ -72,6 +80,8 @@ class SandboxTest(unittest.TestCase):
         tool.agents_md.write_text(AGENTS_TEMPLATE, encoding="utf-8", newline="\n")
         if git_files is not None:
             tool.git_files_override = git_files
+        if tracked_files is not None:
+            tool.git_tracked_override = tracked_files
         return tool
 
 
@@ -139,6 +149,20 @@ class NormalizeTest(unittest.TestCase):
         with self.assertRaises(ToolError):
             normalize_data(data)
 
+    def test_git_ignore_flag_canonical(self):
+        node = {"desc": "x", "git-ignore": False}
+        out = normalize_data({"tags": {}, "tree": {"n": node}})
+        # git-ignore 三态：键在即显式设置，true/false 均落盘（false 覆写祖先豁免）；缺省不落盘 = 继承
+        self.assertEqual(list(out["tree"]["n"]), ["kind", "desc", "git-ignore"])
+        self.assertIs(out["tree"]["n"]["git-ignore"], False)
+        node = {"desc": "x", "hidden": False, "git-ignore": True}
+        out = normalize_data({"tags": {}, "tree": {"n": node}})
+        # hidden 维持旧惯例（false 默认值不落盘），仅 git-ignore 特殊
+        self.assertEqual(list(out["tree"]["n"]), ["kind", "desc", "git-ignore"])
+        self.assertIs(out["tree"]["n"]["git-ignore"], True)
+        with self.assertRaises(ToolError):  # 非 bool 拒绝（同 collapsed/hidden）
+            normalize_data({"tags": {}, "tree": {"n": {"desc": "x", "git-ignore": "yes"}}})
+
 
 class AddRmTest(SandboxTest):
     def test_add_creates_parent_chain(self):
@@ -185,7 +209,7 @@ class CmdAddTagsTest(SandboxTest):
 
         args = types.SimpleNamespace(
             path="apps/new.ts", desc="新文件", detail=None, rel=None, tags=tags, dir=False,
-            collapsed=None, hidden=None,
+            collapsed=None, hidden=None, git_ignore=None,
         )
         _cmd_add(tool, args)
 
@@ -365,7 +389,7 @@ class KindFieldTest(SandboxTest):
         import types
 
         tool = self.make_tool()
-        args = types.SimpleNamespace(kw=None, tag=None, rel_of=None, json=True)
+        args = types.SimpleNamespace(kw=None, tag=None, rel_of=None, under=None, depth=None, json=True)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             _cmd_query(tool, args)
@@ -373,6 +397,42 @@ class KindFieldTest(SandboxTest):
         by_path = {e["path"]: e for e in payload}
         self.assertEqual(by_path["apps"]["kind"], "dir")
         self.assertEqual(by_path["Cargo.toml"]["kind"], "file")
+
+    def test_query_json_keeps_git_ignore_tri_state(self):
+        # --json 三态保真：null=缺省继承、false=显式退出、true=豁免（二态默认值会把 null 拍平成 false）
+        import contextlib
+        import io
+        import types
+
+        tool = self.make_tool()
+        tool.add("apps/exit.rs", desc="退出", detail=["x"], git_ignore=False)
+        tool.add("apps/kept.rs", desc="豁免", detail=["x"], git_ignore=True)
+        args = types.SimpleNamespace(kw=None, tag=None, rel_of=None, under="apps", depth=None, json=True)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _cmd_query(tool, args)
+        by_path = {e["path"]: e for e in json.loads(buf.getvalue())}
+        self.assertIsNone(by_path["apps/main.tsx"]["git-ignore"])  # 缺省继承
+        self.assertIs(by_path["apps/exit.rs"]["git-ignore"], False)  # 显式退出
+        self.assertIs(by_path["apps/kept.rs"]["git-ignore"], True)
+
+    def test_cli_query_wires_under_and_depth(self):
+        # 锁定 CLI 层接线：_cmd_query 必须把 under/depth 传给方法层（回归：曾整层漏传、参数被静默丢弃）
+        import contextlib
+        import io
+        import types
+
+        tool = self.make_tool()
+        tool.add("apps/ui", desc="UI 层", is_dir_entry=True)
+        tool.add("apps/ui/button.tsx", desc="按钮", detail=["x"])
+        args = types.SimpleNamespace(kw=None, tag=None, rel_of=None, under="apps", depth=1, json=True)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _cmd_query(tool, args)
+        self.assertEqual(
+            [e["path"] for e in json.loads(buf.getvalue())],
+            ["apps", "apps/main.tsx", "apps/ui", "apps/util.ts"],
+        )
 
     def test_kind_not_rendered(self):
         tool = self.make_tool()
@@ -616,6 +676,347 @@ class CheckTest(SandboxTest):
         )
 
 
+class GitIgnoreTest(SandboxTest):
+    """git-ignore 校验控制字段：豁免"必须被 git 跟踪"的对照，check 只看磁盘存在与 git 排除态。
+
+    注入口语义：git_files = tracked ∪ untracked-unignored（被 .gitignore 忽略的文件不在其中，
+    同 git ls-files --cached --others --exclude-standard）；tracked_files = --cached 集合。
+    """
+
+    def write_disk(self, tool: TreeTool, rel: str, content: str = "x") -> None:
+        path = tool.repo_root.joinpath(*split_rel_path(rel))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def test_add_and_upsert_git_ignore(self):
+        tool = self.make_tool()
+        tool.add("data.bin", desc="大文件", detail=["完整描述"], git_ignore=True)
+        self.assertIs(tool.get("data.bin")["git-ignore"], True)
+        tool.add("data.bin", desc="大文件")  # 未指定的标志保留
+        self.assertIs(tool.get("data.bin")["git-ignore"], True)
+        # 显式 false 落盘（覆写祖先豁免用），与 collapsed/hidden 的"清除"语义不同
+        tool.add("data.bin", desc="大文件", git_ignore=False)
+        self.assertIs(tool.get("data.bin")["git-ignore"], False)
+
+    def test_add_batch_git_ignore_field(self):
+        tool = self.make_tool(data={"tags": {}, "tree": {}})
+        entries = [
+            {"path": "data.bin", "desc": "大文件", "git-ignore": True},
+            {"path": "pkg.zip", "desc": "离线包", "git-ignore": False},
+        ]
+        tool.add_batch(entries)
+        self.assertIs(tool.get("data.bin")["git-ignore"], True)
+        self.assertIs(tool.get("pkg.zip")["git-ignore"], False)  # 显式 false 同样落盘
+
+    def test_check_passes_when_ignored_on_disk(self):
+        # 磁盘存在 + 不在 git_files（被 .gitignore 忽略）→ 通过，不报"未被 git 跟踪"
+        tool = self.make_tool(git_files={"apps/main.tsx", "apps/util.ts", "Cargo.toml"})
+        self.write_disk(tool, "data.bin")
+        tool.add("data.bin", desc="大文件", detail=["完整描述"], git_ignore=True)
+        tool.render()
+        self.assertEqual(tool.check(), ([], []))
+
+    def test_check_reports_missing_disk(self):
+        # 豁免只豁免 git 对照，不豁免磁盘存在性
+        tool = self.make_tool(git_files={"apps/main.tsx", "apps/util.ts", "Cargo.toml"})
+        tool.add("data.bin", desc="大文件", detail=["完整描述"], git_ignore=True)
+        tool.render()
+        errors, _ = tool.check()
+        self.assertEqual(
+            [e for e in errors if "data.bin" in e],
+            ["E: data.bin git-ignore 条目磁盘不存在"],
+        )
+
+    def test_check_reports_tracked_contradiction(self):
+        # 标记 git-ignore 但实际被 git 跟踪：矛盾态（tracked ⊆ git_files，差集循环不可见，须单独拦截）
+        base = {"apps/main.tsx", "apps/util.ts", "Cargo.toml"}
+        tool = self.make_tool(git_files=base | {"data.bin"}, tracked_files=base | {"data.bin"})
+        self.write_disk(tool, "data.bin")
+        tool.add("data.bin", desc="大文件", detail=["完整描述"], git_ignore=True)
+        tool.render()
+        errors, _ = tool.check()
+        self.assertEqual(
+            [e for e in errors if "data.bin" in e],
+            ["E: data.bin 标记 git-ignore 但实际被 git 跟踪（git rm --cached 或移除标记恢复对照）"],
+        )
+
+    def test_check_reports_unignored_untracked(self):
+        # 磁盘存在、未跟踪、但 .gitignore 没覆盖（git status 会持续显示 untracked）→ 错误
+        base = {"apps/main.tsx", "apps/util.ts", "Cargo.toml"}
+        tool = self.make_tool(git_files=base | {"data.bin"}, tracked_files=base)
+        self.write_disk(tool, "data.bin")
+        tool.add("data.bin", desc="大文件", detail=["完整描述"], git_ignore=True)
+        tool.render()
+        errors, _ = tool.check()
+        self.assertEqual(
+            [e for e in errors if "data.bin" in e],
+            ["E: data.bin 标记 git-ignore 但未被 .gitignore 排除（补 ignore 规则或移除标记）"],
+        )
+
+    def test_dir_git_ignore_exempts_subtree(self):
+        # 目录标记 → 子树文件条目继承豁免；子树外条目照旧对照
+        tool = self.make_tool(git_files={"apps/main.tsx", "apps/util.ts", "Cargo.toml"})
+        self.write_disk(tool, "datasets/a.bin")
+        self.write_disk(tool, "apps/gone.tsx")
+        tool.add("datasets", desc="数据集", is_dir_entry=True, git_ignore=True)
+        tool.add("datasets/a.bin", desc="数据", detail=["完整描述"])
+        tool.add("apps/gone.tsx", desc="未豁免", detail=["完整描述"])
+        tool.render()
+        errors, _ = tool.check()
+        self.assertFalse(any("datasets" in e for e in errors), errors)  # 子树豁免生效
+        self.assertTrue(any("apps/gone.tsx" in e and "未被 git 跟踪" in e for e in errors), errors)
+
+    def test_explicit_false_overrides_ancestor(self):
+        # .gitignore ! 规则场景：目录整体豁免但个别子文件走 git（tracked）。
+        # 继承会把 tracked 子文件卷进豁免集合 → 误报矛盾；显式 false 就近覆写后恢复正常对照
+        base = {"apps/main.tsx", "apps/util.ts", "Cargo.toml"}
+        tool = self.make_tool(git_files=base | {"datasets/README.md"},
+                              tracked_files=base | {"datasets/README.md"})
+        self.write_disk(tool, "datasets/README.md")
+        tool.add("datasets", desc="数据集", is_dir_entry=True, git_ignore=True)
+        tool.add("datasets/README.md", desc="说明", detail=["完整描述"])  # 无显式设置 → 继承 true
+        tool.render()
+        errors, _ = tool.check()
+        self.assertTrue(any("README.md" in e and "被 git 跟踪" in e for e in errors), errors)  # 缺口基准：误报
+        tool.add("datasets/README.md", desc="说明", git_ignore=False)  # 显式 false 覆写
+        tool.render()
+        errors, _ = tool.check()
+        self.assertFalse(any("README.md" in e for e in errors), errors)  # 误报消除
+
+    def test_false_inherits_down_subtree(self):
+        # 就近覆写向下传递：爷 true + 中间目录 false + 孙无显式设置 → 孙不豁免
+        tool = self.make_tool(git_files={"apps/main.tsx", "apps/util.ts", "Cargo.toml"})
+        self.write_disk(tool, "datasets/sub/x.bin")
+        tool.add("datasets", desc="数据集", is_dir_entry=True, git_ignore=True)
+        tool.add("datasets/sub", desc="例外子集", is_dir_entry=True, git_ignore=False)
+        tool.add("datasets/sub/x.bin", desc="数据", detail=["完整描述"])
+        tool.render()
+        errors, _ = tool.check()
+        self.assertTrue(any("x.bin" in e and "未被 git 跟踪" in e for e in errors), errors)
+
+    def test_git_ignore_keeps_render_and_query(self):
+        # 校验控制字段不影响渲染：简版树照常显示；get / query --json 可见
+        tool = self.make_tool(git_files={"apps/main.tsx", "apps/util.ts", "Cargo.toml"})
+        self.write_disk(tool, "data.bin")
+        tool.add("data.bin", desc="大文件", detail=["完整描述"], git_ignore=True)
+        tool.render()
+        self.assertIn("data.bin", tool.render_brief_tree())
+        self.assertIs(tool.get("data.bin")["git-ignore"], True)
+        import contextlib
+        import io
+        import types
+
+        args = types.SimpleNamespace(kw="data.bin", tag=None, rel_of=None, under=None, depth=None, json=True)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _cmd_query(tool, args)
+        payload = json.loads(buf.getvalue())
+        self.assertIs(payload[0]["git-ignore"], True)
+
+    def test_check_exempt_disk_dir_type_mismatch(self):
+        # 豁免条目磁盘上是目录：报类型错配并给修正指引，不误诊为"磁盘不存在"（与非豁免分支对称）。
+        # 先 add 后建目录（模拟存量错配）：先建目录会被 add 自动识别为目录条目，走不进豁免对照
+        tool = self.make_tool(git_files={"apps/main.tsx", "apps/util.ts", "Cargo.toml"})
+        tool.add("legacy.bin", desc="遗留大文件", detail=["完整描述"], git_ignore=True)
+        tool.repo_root.joinpath("legacy.bin").mkdir()
+        tool.render()
+        errors, _ = tool.check()
+        self.assertTrue(any("legacy.bin" in e and "磁盘上是目录" in e for e in errors), errors)
+        self.assertFalse(any("磁盘不存在" in e for e in errors), errors)
+
+
+class MarkTest(SandboxTest):
+    """mark 子树批量标记：tags 追加/覆写、git-ignore 传播（仅文件条目）、depth 限制、单步历史。
+
+    夹具 docs 子树：a.md(深1)、sub/(深1, 目录)、b.md(深2)、deep/(深2, 目录)、c.md(深3)——
+    文件 3 / 目录 2 / 共 5 条；docs 自身与 Cargo.toml 在作用域外。
+    """
+
+    def make_mark_tool(self, git_files: set[str] | None = None, tracked_files: set[str] | None = None) -> TreeTool:
+        return self.make_tool(
+            data={
+            "tags": {"doc": "文档", "big": "大文件"},
+            "tree": {
+                "docs": {"desc": "文档", "children": {
+                    "a.md": {"desc": "a", "detail": ["x"]},
+                    "sub": {"desc": "子目录", "children": {
+                        "b.md": {"desc": "b", "detail": ["x"]},
+                        "deep": {"desc": "更深层", "children": {
+                            "c.md": {"desc": "c", "detail": ["x"]},
+                        }},
+                    }},
+                }},
+                "Cargo.toml": {"desc": "根配置", "detail": ["x"]},
+            },
+        }, git_files=git_files, tracked_files=tracked_files)
+
+    def test_tags_add_union(self):
+        tool = self.make_mark_tool()
+        n_tags, n_git, _ = tool.mark("docs", tags=["doc"])
+        self.assertEqual((n_tags, n_git), (5, 0))  # 子树全部条目（含目录）
+        for path in ["docs/a.md", "docs/sub", "docs/sub/b.md", "docs/sub/deep", "docs/sub/deep/c.md"]:
+            self.assertEqual(tool.get(path).get("tags"), ["doc"], path)
+        n_tags, _, _ = tool.mark("docs", tags=["big"])  # 并集追加
+        self.assertEqual(n_tags, 5)
+        self.assertEqual(tool.get("docs/a.md")["tags"], ["big", "doc"])  # 规范化排序
+        n_tags, _, _ = tool.mark("docs", tags=["doc"])  # 无新值 → 不计受影响
+        self.assertEqual(n_tags, 0)
+
+    def test_tags_replace_and_clear(self):
+        tool = self.make_mark_tool()
+        tool.mark("docs", tags=["doc"])
+        n_tags, _, _ = tool.mark("docs", tags=["big"], tags_mode="replace")
+        self.assertEqual(n_tags, 5)
+        self.assertEqual(tool.get("docs/a.md")["tags"], ["big"])
+        n_tags, _, _ = tool.mark("docs", tags=[], tags_mode="replace")  # 空列表 = 清空
+        self.assertEqual(n_tags, 5)
+        self.assertNotIn("tags", tool.get("docs/a.md"))
+        n_tags, _, _ = tool.mark("docs", tags=[], tags_mode="replace")  # 已清空 → 不计
+        self.assertEqual(n_tags, 0)
+
+    def test_scope_excludes_target_and_outside(self):
+        tool = self.make_mark_tool()
+        tool.mark("docs", tags=["doc"])
+        self.assertNotIn("tags", tool.get("docs"))  # 传播不含目标目录自身
+        self.assertNotIn("tags", tool.get("Cargo.toml"))  # 子树外不受影响
+
+    def test_depth_limit(self):
+        tool = self.make_mark_tool()
+        n_tags, n_git, _ = tool.mark("docs", tags=["doc"], git_ignore=True, depth=1)
+        self.assertEqual(n_tags, 2)  # 仅深度 1：a.md、sub
+        self.assertEqual(n_git, 1)  # 深度 1 的文件只有 a.md（git-ignore 不落目录，防继承穿透 depth）
+        self.assertEqual(tool.get("docs/a.md")["tags"], ["doc"])
+        self.assertEqual(tool.get("docs/a.md")["git-ignore"], True)
+        self.assertNotIn("tags", tool.get("docs/sub/b.md"))
+        self.assertNotIn("git-ignore", tool.get("docs/sub/b.md"))
+        self.assertNotIn("git-ignore", tool.get("docs/sub"))  # 目录不落标记
+
+    def test_git_ignore_files_only_and_check(self):
+        # mark 传播豁免后 check 联动：文件豁免生效零错误、目录条目不落标记
+        tool = self.make_mark_tool(git_files={"Cargo.toml"})
+        for rel in ["docs/a.md", "docs/sub/b.md", "docs/sub/deep/c.md"]:  # 磁盘就位，不在 git_files = 模拟被忽略
+            disk = tool.repo_root.joinpath(*split_rel_path(rel))
+            disk.parent.mkdir(parents=True, exist_ok=True)
+            disk.write_text("x", encoding="utf-8")
+        _, n_git, n_skip = tool.mark("docs", git_ignore=True)
+        self.assertEqual((n_git, n_skip), (3, 0))
+        for path in ["docs/sub", "docs/sub/deep"]:
+            self.assertNotIn("git-ignore", tool.get(path))  # 目录条目不落标记
+        tool.render()
+        self.assertEqual(tool.check(), ([], []))
+
+    def test_git_ignore_false_overwrite(self):
+        # false 传播作用于缺省态文件（批量退出豁免）；显式设置不被批量覆写
+        tool = self.make_mark_tool()
+        _, n_git, _ = tool.mark("docs/sub", git_ignore=False)
+        self.assertEqual(n_git, 2)  # b.md、c.md 落显式 false（就近覆写三态）
+        self.assertIs(tool.get("docs/sub/b.md")["git-ignore"], False)
+        # 个体表态优先：显式 false 的条目不被后续 true 传播覆写
+        _, n_git, _ = tool.mark("docs", git_ignore=True)
+        self.assertEqual(n_git, 1)  # 仅缺省态的 a.md 落 true
+        self.assertIs(tool.get("docs/a.md")["git-ignore"], True)
+        self.assertIs(tool.get("docs/sub/b.md")["git-ignore"], False)
+
+    def test_git_ignore_true_skips_tracked(self):
+        # true 传播跳过 git 已跟踪文件（落 true 即矛盾标记，check 必报错）
+        tool = self.make_mark_tool(git_files={"Cargo.toml", "docs/a.md"},
+                                   tracked_files={"Cargo.toml", "docs/a.md"})
+        _, n_git, n_skip = tool.mark("docs", git_ignore=True)
+        self.assertEqual((n_git, n_skip), (2, 1))  # b.md、c.md 落 true；a.md 跳过
+        self.assertNotIn("git-ignore", tool.get("docs/a.md"))
+
+    def test_git_ignore_false_covers_tracked(self):
+        # false 传播不跳 tracked：tracked 文件落显式 false 恰是"退出祖先豁免"的修复动作
+        tool = self.make_mark_tool(git_files={"Cargo.toml", "docs/a.md"},
+                                   tracked_files={"Cargo.toml", "docs/a.md"})
+        _, n_git, n_skip = tool.mark("docs", git_ignore=False)
+        self.assertEqual((n_git, n_skip), (3, 0))
+        self.assertIs(tool.get("docs/a.md")["git-ignore"], False)
+
+    def test_errors(self):
+        tool = self.make_mark_tool()
+        with self.assertRaises(ToolError):  # 目录条目不存在
+            tool.mark("nope", tags=["doc"])
+        with self.assertRaises(ToolError):  # 文件条目不能作为锚点
+            tool.mark("Cargo.toml", tags=["doc"])
+        with self.assertRaises(ToolError):  # 粗粒度目录无 children，无可传播条目
+            tool.add("assets", desc="图标集", is_dir_entry=True)
+            tool.mark("assets", tags=["doc"])
+        with self.assertRaises(ToolError):  # 无动作参数
+            tool.mark("docs")
+        with self.assertRaises(ToolError):  # 未知标签
+            tool.mark("docs", tags=["nope"])
+        with self.assertRaises(ToolError):  # depth 正整数
+            tool.mark("docs", tags=["doc"], depth=0)
+        # 前置校验失败保持原子：无半落盘（含 assets 建链后的基线）
+        before = tool.tree_json.read_bytes()
+        with self.assertRaises(ToolError):
+            tool.mark("docs", tags=["nope"])
+        self.assertEqual(tool.tree_json.read_bytes(), before)
+
+    def test_undo_single_step(self):
+        tool = self.make_mark_tool()
+        tool.mark("docs", tags=["doc"])
+        tool.undo()
+        for path in ["docs/a.md", "docs/sub", "docs/sub/b.md", "docs/sub/deep", "docs/sub/deep/c.md"]:
+            self.assertNotIn("tags", tool.get(path), path)  # 一次 mark = 一步历史，undo 整体回滚
+
+    def test_redo_roundtrip(self):
+        tool = self.make_mark_tool()
+        tool.mark("docs", tags=["doc"])
+        tool.undo()
+        tool.redo()
+        self.assertEqual(tool.get("docs/a.md")["tags"], ["doc"])  # redo 完整恢复子树标记
+
+
+class CmdMarkTest(SandboxTest):
+    """CLI 层 _cmd_mark 的参数解析契约：--tags 空串/缺省区分、拆分去空白、输出文案。"""
+
+    def run_cmd_mark(self, tool, path="apps", tags=None, tags_mode="add", git_ignore=None, depth=None):
+        import types
+
+        args = types.SimpleNamespace(path=path, tags=tags, tags_mode=tags_mode, git_ignore=git_ignore, depth=depth)
+        _cmd_mark(tool, args)
+
+    def test_tags_empty_string_means_clear(self):
+        # --tags "" 是显式空列表（配 replace 清空），不折算为 None——CLI 解析独立于方法层，须单独锁定
+        tool = self.make_tool()
+        tool.mark("apps", tags=["pure"])
+        self.run_cmd_mark(tool, tags="", tags_mode="replace")
+        self.assertNotIn("tags", tool.get("apps/main.tsx"))
+
+    def test_tags_none_keeps_field(self):
+        tool = self.make_tool()
+        tool.mark("apps", tags=["pure"])
+        self.run_cmd_mark(tool, tags=None, git_ignore=False)
+        self.assertEqual(tool.get("apps/main.tsx")["tags"], ["pure"])  # 缺省不动 tags
+        self.assertIs(tool.get("apps/main.tsx")["git-ignore"], False)  # false 传播照常
+
+    def test_tags_split_and_trim(self):
+        tool = self.make_tool()
+        self.run_cmd_mark(tool, tags=" pure , test ")
+        self.assertEqual(tool.get("apps/main.tsx")["tags"], ["pure", "test"])
+
+    def test_output_skip_note_by_direction(self):
+        import contextlib
+        import io
+
+        tool = self.make_tool()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.run_cmd_mark(tool, tags="pure")
+        self.assertNotIn("跳过", buf.getvalue())  # 无跳过不显示
+        tool.add("apps/main.tsx", desc="入口", git_ignore=False)  # 制造一条显式设置
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.run_cmd_mark(tool, git_ignore=True)
+        self.assertIn("跳过 1 条（显式设置/git 已跟踪不覆写）", buf.getvalue())  # true 方向文案
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.run_cmd_mark(tool, git_ignore=False)
+        self.assertIn("跳过 2 条（显式设置不覆写）", buf.getvalue())  # false 方向：两条显式设置都跳过
+
+
 class GitDirTest(unittest.TestCase):
     """git 私有区识别：以 <gitdir>/HEAD 为准，绝不创建 .git。"""
 
@@ -789,10 +1190,63 @@ class QueryTest(SandboxTest):
         paths = [p for p, _ in tool.query(rel_of="Cargo.toml")]
         self.assertEqual(paths, ["apps/main.tsx"])
 
+    def test_under_filters_subtree_and_includes_self(self):
+        # --under 锚点自身也算"这块"的条目；子树全量、子树外排除
+        tool = self.make_tool()
+        tool.add("apps/render.rs", desc="渲染", detail=["x"])
+        paths = [p for p, _ in tool.query(under="apps")]
+        self.assertEqual(paths, ["apps", "apps/main.tsx", "apps/render.rs", "apps/util.ts"])
+
+    def test_under_depth(self):
+        tool = self.make_tool()
+        tool.add("apps/ui", desc="UI 层", is_dir_entry=True)
+        tool.add("apps/ui/button.tsx", desc="按钮", detail=["x"])
+        # depth=1：锚点自身（相对深度 0）+ 直接子级
+        paths = [p for p, _ in tool.query(under="apps", depth=1)]
+        self.assertEqual(paths, ["apps", "apps/main.tsx", "apps/ui", "apps/util.ts"])
+
+    def test_under_combines_with_other_filters(self):
+        tool = self.make_tool()
+        paths = [p for p, _ in tool.query(under="apps", tag="pure")]
+        self.assertEqual(paths, ["apps/util.ts"])
+
+    def test_under_and_depth_errors(self):
+        tool = self.make_tool()
+        with self.assertRaises(ToolError):  # --under 必须是树中目录条目
+            tool.query(under="apps/main.tsx")
+        with self.assertRaises(ToolError):
+            tool.query(under="nope")
+        with self.assertRaises(ToolError):  # depth 须与 under 同用
+            tool.query(depth=1)
+        with self.assertRaises(ToolError):  # depth 正整数
+            tool.query(under="apps", depth=0)
+
     def test_get_missing_raises(self):
         tool = self.make_tool()
         with self.assertRaises(ToolError):
             tool.get("nope.rs")
+
+    def test_get_multiple_paths(self):
+        # get 多路径批量查看：逐条输出、条间空行分隔；单路径输出与旧格式一致
+        import contextlib
+        import io
+        import types
+
+        tool = self.make_tool()
+        args = types.SimpleNamespace(path=["Cargo.toml", "apps/util.ts"])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _cmd_get(tool, args)
+        out = buf.getvalue()
+        self.assertIn("Cargo.toml", out)
+        self.assertIn("apps/util.ts", out)
+        self.assertIn("类型: 文件", out)
+        self.assertTrue(out.index("Cargo.toml") < out.index("apps/util.ts"))
+        args = types.SimpleNamespace(path=["Cargo.toml"])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _cmd_get(tool, args)
+        self.assertFalse(buf.getvalue().startswith("\n"))  # 单路径无前导空行
 
 
 class AddBatchTest(SandboxTest):
