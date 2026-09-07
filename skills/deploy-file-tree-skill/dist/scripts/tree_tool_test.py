@@ -20,6 +20,7 @@ from tree_tool import (  # noqa: E402
     _cmd_add,
     _cmd_add_batch,
     _cmd_get,
+    _cmd_mark,
     _cmd_mv,
     _cmd_mv_batch,
     _cmd_query,
@@ -158,6 +159,7 @@ class NormalizeTest(unittest.TestCase):
         out = normalize_data({"tags": {}, "tree": {"n": node}})
         # hidden 维持旧惯例（false 默认值不落盘），仅 git-ignore 特殊
         self.assertEqual(list(out["tree"]["n"]), ["kind", "desc", "git-ignore"])
+        self.assertIs(out["tree"]["n"]["git-ignore"], True)
         with self.assertRaises(ToolError):  # 非 bool 拒绝（同 collapsed/hidden）
             normalize_data({"tags": {}, "tree": {"n": {"desc": "x", "git-ignore": "yes"}}})
 
@@ -387,7 +389,7 @@ class KindFieldTest(SandboxTest):
         import types
 
         tool = self.make_tool()
-        args = types.SimpleNamespace(kw=None, tag=None, rel_of=None, json=True)
+        args = types.SimpleNamespace(kw=None, tag=None, rel_of=None, under=None, depth=None, json=True)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             _cmd_query(tool, args)
@@ -395,6 +397,42 @@ class KindFieldTest(SandboxTest):
         by_path = {e["path"]: e for e in payload}
         self.assertEqual(by_path["apps"]["kind"], "dir")
         self.assertEqual(by_path["Cargo.toml"]["kind"], "file")
+
+    def test_query_json_keeps_git_ignore_tri_state(self):
+        # --json 三态保真：null=缺省继承、false=显式退出、true=豁免（二态默认值会把 null 拍平成 false）
+        import contextlib
+        import io
+        import types
+
+        tool = self.make_tool()
+        tool.add("apps/exit.rs", desc="退出", detail=["x"], git_ignore=False)
+        tool.add("apps/kept.rs", desc="豁免", detail=["x"], git_ignore=True)
+        args = types.SimpleNamespace(kw=None, tag=None, rel_of=None, under="apps", depth=None, json=True)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _cmd_query(tool, args)
+        by_path = {e["path"]: e for e in json.loads(buf.getvalue())}
+        self.assertIsNone(by_path["apps/main.tsx"]["git-ignore"])  # 缺省继承
+        self.assertIs(by_path["apps/exit.rs"]["git-ignore"], False)  # 显式退出
+        self.assertIs(by_path["apps/kept.rs"]["git-ignore"], True)
+
+    def test_cli_query_wires_under_and_depth(self):
+        # 锁定 CLI 层接线：_cmd_query 必须把 under/depth 传给方法层（回归：曾整层漏传、参数被静默丢弃）
+        import contextlib
+        import io
+        import types
+
+        tool = self.make_tool()
+        tool.add("apps/ui", desc="UI 层", is_dir_entry=True)
+        tool.add("apps/ui/button.tsx", desc="按钮", detail=["x"])
+        args = types.SimpleNamespace(kw=None, tag=None, rel_of=None, under="apps", depth=1, json=True)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _cmd_query(tool, args)
+        self.assertEqual(
+            [e["path"] for e in json.loads(buf.getvalue())],
+            ["apps", "apps/main.tsx", "apps/ui", "apps/util.ts"],
+        )
 
     def test_kind_not_rendered(self):
         tool = self.make_tool()
@@ -768,12 +806,23 @@ class GitIgnoreTest(SandboxTest):
         import io
         import types
 
-        args = types.SimpleNamespace(kw="data.bin", tag=None, rel_of=None, json=True)
+        args = types.SimpleNamespace(kw="data.bin", tag=None, rel_of=None, under=None, depth=None, json=True)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             _cmd_query(tool, args)
         payload = json.loads(buf.getvalue())
         self.assertIs(payload[0]["git-ignore"], True)
+
+    def test_check_exempt_disk_dir_type_mismatch(self):
+        # 豁免条目磁盘上是目录：报类型错配并给修正指引，不误诊为"磁盘不存在"（与非豁免分支对称）。
+        # 先 add 后建目录（模拟存量错配）：先建目录会被 add 自动识别为目录条目，走不进豁免对照
+        tool = self.make_tool(git_files={"apps/main.tsx", "apps/util.ts", "Cargo.toml"})
+        tool.add("legacy.bin", desc="遗留大文件", detail=["完整描述"], git_ignore=True)
+        tool.repo_root.joinpath("legacy.bin").mkdir()
+        tool.render()
+        errors, _ = tool.check()
+        self.assertTrue(any("legacy.bin" in e and "磁盘上是目录" in e for e in errors), errors)
+        self.assertFalse(any("磁盘不存在" in e for e in errors), errors)
 
 
 class MarkTest(SandboxTest):
@@ -886,6 +935,7 @@ class MarkTest(SandboxTest):
 
     def test_errors(self):
         tool = self.make_mark_tool()
+        before = tool.tree_json.read_bytes()
         with self.assertRaises(ToolError):  # 目录条目不存在
             tool.mark("nope", tags=["doc"])
         with self.assertRaises(ToolError):  # 文件条目不能作为锚点
@@ -899,6 +949,11 @@ class MarkTest(SandboxTest):
             tool.mark("docs", tags=["nope"])
         with self.assertRaises(ToolError):  # depth 正整数
             tool.mark("docs", tags=["doc"], depth=0)
+        # 前置校验失败保持原子：无半落盘（含 assets 建链后的基线）
+        before = tool.tree_json.read_bytes()
+        with self.assertRaises(ToolError):
+            tool.mark("docs", tags=["nope"])
+        self.assertEqual(tool.tree_json.read_bytes(), before)
 
     def test_undo_single_step(self):
         tool = self.make_mark_tool()
@@ -906,6 +961,61 @@ class MarkTest(SandboxTest):
         tool.undo()
         for path in ["docs/a.md", "docs/sub", "docs/sub/b.md", "docs/sub/deep", "docs/sub/deep/c.md"]:
             self.assertNotIn("tags", tool.get(path), path)  # 一次 mark = 一步历史，undo 整体回滚
+
+    def test_redo_roundtrip(self):
+        tool = self.make_mark_tool()
+        tool.mark("docs", tags=["doc"])
+        tool.undo()
+        tool.redo()
+        self.assertEqual(tool.get("docs/a.md")["tags"], ["doc"])  # redo 完整恢复子树标记
+
+
+class CmdMarkTest(SandboxTest):
+    """CLI 层 _cmd_mark 的参数解析契约：--tags 空串/缺省区分、拆分去空白、输出文案。"""
+
+    def run_cmd_mark(self, tool, path="apps", tags=None, tags_mode="add", git_ignore=None, depth=None):
+        import types
+
+        args = types.SimpleNamespace(path=path, tags=tags, tags_mode=tags_mode, git_ignore=git_ignore, depth=depth)
+        _cmd_mark(tool, args)
+
+    def test_tags_empty_string_means_clear(self):
+        # --tags "" 是显式空列表（配 replace 清空），不折算为 None——CLI 解析独立于方法层，须单独锁定
+        tool = self.make_tool()
+        tool.mark("apps", tags=["pure"])
+        self.run_cmd_mark(tool, tags="", tags_mode="replace")
+        self.assertNotIn("tags", tool.get("apps/main.tsx"))
+
+    def test_tags_none_keeps_field(self):
+        tool = self.make_tool()
+        tool.mark("apps", tags=["pure"])
+        self.run_cmd_mark(tool, tags=None, git_ignore=False)
+        self.assertEqual(tool.get("apps/main.tsx")["tags"], ["pure"])  # 缺省不动 tags
+        self.assertIs(tool.get("apps/main.tsx")["git-ignore"], False)  # false 传播照常
+
+    def test_tags_split_and_trim(self):
+        tool = self.make_tool()
+        self.run_cmd_mark(tool, tags=" pure , test ")
+        self.assertEqual(tool.get("apps/main.tsx")["tags"], ["pure", "test"])
+
+    def test_output_skip_note_by_direction(self):
+        import contextlib
+        import io
+
+        tool = self.make_tool()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.run_cmd_mark(tool, tags="pure")
+        self.assertNotIn("跳过", buf.getvalue())  # 无跳过不显示
+        tool.add("apps/main.tsx", desc="入口", git_ignore=False)  # 制造一条显式设置
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.run_cmd_mark(tool, git_ignore=True)
+        self.assertIn("跳过 1 条（显式设置/git 已跟踪不覆写）", buf.getvalue())  # true 方向文案
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.run_cmd_mark(tool, git_ignore=False)
+        self.assertIn("跳过 2 条（显式设置不覆写）", buf.getvalue())  # false 方向：两条显式设置都跳过
 
 
 class GitDirTest(unittest.TestCase):

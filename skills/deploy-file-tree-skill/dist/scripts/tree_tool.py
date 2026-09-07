@@ -25,7 +25,9 @@ git 之外（未被跟踪且被 ignore 规则覆盖，二者违反其一均报�
   python tree_tool.py add <path> -d 描述 [--detail 行]... [--rel 路径]... [--tags a,b] [--dir]
                          [--collapsed|--no-collapsed] [--hidden|--no-hidden]
                          [--git-ignore|--no-git-ignore]
+  python tree_tool.py add-batch <manifest.json>
   python tree_tool.py rm <path>
+  python tree_tool.py rm-batch <path>...
   python tree_tool.py mv <src> <dst>
   python tree_tool.py mv-batch <manifest.json>
   python tree_tool.py get <path>...             # 查看条目（可多路径批量）
@@ -37,6 +39,7 @@ git 之外（未被跟踪且被 ignore 规则覆盖，二者违反其一均报�
   python tree_tool.py undo | redo | history
   python tree_tool.py check [--strict]
   python tree_tool.py render
+  python tree_tool.py root [<名>|--clear]
 
 撤销历史（默认 20 步）存放于 git 私有区 <gitdir>/file-tree/history.json：
 不被 git 追踪、不入库、clone 不携带；非 git 仓库退化为技能目录 .history.json。
@@ -943,6 +946,8 @@ class TreeTool:
         value = False
         cursor: dict = {"children": tree}
         for part in split_rel_path(path):
+            if not is_dir(cursor):
+                break  # 中途段是文件条目：无更深的祖先设置可继承（与 _find_node 同防御）
             child = cursor["children"].get(part)
             if child is None:
                 break
@@ -1219,6 +1224,8 @@ def _cmd_get(tool: TreeTool, args) -> None:
         if node.get("tags"):
             rendered = ", ".join(f"{t}（{vocab.get(t, '?')}）" for t in node["tags"])
             print(f"  tags: {rendered}")
+
+
 def _cmd_mark(tool: TreeTool, args) -> None:
     # --tags "" 是显式空列表（配合 replace 清空），不折算为 None；缺省（不给参数）才是"不动"
     tags = None if args.tags is None else [t.strip() for t in args.tags.split(",") if t.strip()]
@@ -1230,12 +1237,14 @@ def _cmd_mark(tool: TreeTool, args) -> None:
         depth=args.depth,
     )
     tool.render()
-    skip_note = f"，跳过 {n_skip} 条（显式设置/git 已跟踪不覆写）" if n_skip else ""
+    # 跳过原因按方向表述：false 方向不跳 tracked（tracked 落显式 false 是修复动作），只剩显式设置一类
+    reason = "显式设置/git 已跟踪不覆写" if args.git_ignore else "显式设置不覆写"
+    skip_note = f"，跳过 {n_skip} 条（{reason}）" if n_skip else ""
     print(f"已批量标记并重渲染: {args.path}（tags {n_tags} 条，git-ignore {n_git} 条{skip_note}；一次变更，单步历史）")
 
 
 def _cmd_query(tool: TreeTool, args) -> None:
-    results = tool.query(kw=args.kw, tag=args.tag, rel_of=args.rel_of)
+    results = tool.query(kw=args.kw, tag=args.tag, rel_of=args.rel_of, under=args.under, depth=args.depth)
     if args.json:
         payload = [
             {
@@ -1247,7 +1256,8 @@ def _cmd_query(tool: TreeTool, args) -> None:
                 "tags": node.get("tags", []),
                 "collapsed": node.get("collapsed", False),
                 "hidden": node.get("hidden", False),
-                "git-ignore": node.get("git-ignore", False),
+                # git-ignore 是三态字段：null=缺省（继承祖先），false=显式退出豁免——二态默认值会把两者拍平
+                "git-ignore": node.get("git-ignore"),
             }
             for path, node in results
         ]
