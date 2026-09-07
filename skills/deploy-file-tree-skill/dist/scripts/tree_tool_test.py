@@ -54,7 +54,13 @@ def make_data() -> dict:
 class SandboxTest(unittest.TestCase):
     """基类：为每个用例搭临时沙箱并返回配置好的 TreeTool。"""
 
-    def make_tool(self, data: dict | None = None, git_files: set[str] | None = None, history_limit: int = 20) -> TreeTool:
+    def make_tool(
+        self,
+        data: dict | None = None,
+        git_files: set[str] | None = None,
+        tracked_files: set[str] | None = None,
+        history_limit: int = 20,
+    ) -> TreeTool:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
@@ -72,6 +78,8 @@ class SandboxTest(unittest.TestCase):
         tool.agents_md.write_text(AGENTS_TEMPLATE, encoding="utf-8", newline="\n")
         if git_files is not None:
             tool.git_files_override = git_files
+        if tracked_files is not None:
+            tool.git_tracked_override = tracked_files
         return tool
 
 
@@ -139,6 +147,16 @@ class NormalizeTest(unittest.TestCase):
         with self.assertRaises(ToolError):
             normalize_data(data)
 
+    def test_git_ignore_flag_canonical(self):
+        node = {"desc": "x", "git-ignore": False}
+        out = normalize_data({"tags": {}, "tree": {"n": node}})
+        self.assertEqual(list(out["tree"]["n"]), ["kind", "desc"])  # false 默认值不落盘
+        node = {"desc": "x", "hidden": True, "git-ignore": True}
+        out = normalize_data({"tags": {}, "tree": {"n": node}})
+        self.assertEqual(list(out["tree"]["n"]), ["kind", "desc", "hidden", "git-ignore"])  # hidden 之后、children 之前
+        with self.assertRaises(ToolError):  # 非 bool 拒绝（同 collapsed/hidden）
+            normalize_data({"tags": {}, "tree": {"n": {"desc": "x", "git-ignore": "yes"}}})
+
 
 class AddRmTest(SandboxTest):
     def test_add_creates_parent_chain(self):
@@ -185,7 +203,7 @@ class CmdAddTagsTest(SandboxTest):
 
         args = types.SimpleNamespace(
             path="apps/new.ts", desc="新文件", detail=None, rel=None, tags=tags, dir=False,
-            collapsed=None, hidden=None,
+            collapsed=None, hidden=None, git_ignore=None,
         )
         _cmd_add(tool, args)
 
@@ -614,6 +632,115 @@ class CheckTest(SandboxTest):
             [e for e in errors if "ignored.rs" in e],
             ["E: 树中条目未被 git 跟踪: ignored.rs"],
         )
+
+
+class GitIgnoreTest(SandboxTest):
+    """git-ignore 校验控制字段：豁免"必须被 git 跟踪"的对照，check 只看磁盘存在与 git 排除态。
+
+    注入口语义：git_files = tracked ∪ untracked-unignored（被 .gitignore 忽略的文件不在其中，
+    同 git ls-files --cached --others --exclude-standard）；tracked_files = --cached 集合。
+    """
+
+    def write_disk(self, tool: TreeTool, rel: str, content: str = "x") -> None:
+        path = tool.repo_root.joinpath(*split_rel_path(rel))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def test_add_and_upsert_git_ignore(self):
+        tool = self.make_tool()
+        tool.add("data.bin", desc="大文件", detail=["完整描述"], git_ignore=True)
+        self.assertIs(tool.get("data.bin")["git-ignore"], True)
+        tool.add("data.bin", desc="大文件")  # 未指定的标志保留
+        self.assertIs(tool.get("data.bin")["git-ignore"], True)
+        tool.add("data.bin", desc="大文件", git_ignore=False)  # 显式 false 撤销
+        self.assertNotIn("git-ignore", tool.get("data.bin"))
+
+    def test_add_batch_git_ignore_field(self):
+        tool = self.make_tool(data={"tags": {}, "tree": {}})
+        entries = [
+            {"path": "data.bin", "desc": "大文件", "git-ignore": True},
+            {"path": "pkg.zip", "desc": "离线包", "git-ignore": False},
+        ]
+        tool.add_batch(entries)
+        self.assertIs(tool.get("data.bin")["git-ignore"], True)
+        self.assertNotIn("git-ignore", tool.get("pkg.zip"))
+
+    def test_check_passes_when_ignored_on_disk(self):
+        # 磁盘存在 + 不在 git_files（被 .gitignore 忽略）→ 通过，不报"未被 git 跟踪"
+        tool = self.make_tool(git_files={"apps/main.tsx", "apps/util.ts", "Cargo.toml"})
+        self.write_disk(tool, "data.bin")
+        tool.add("data.bin", desc="大文件", detail=["完整描述"], git_ignore=True)
+        tool.render()
+        self.assertEqual(tool.check(), ([], []))
+
+    def test_check_reports_missing_disk(self):
+        # 豁免只豁免 git 对照，不豁免磁盘存在性
+        tool = self.make_tool(git_files={"apps/main.tsx", "apps/util.ts", "Cargo.toml"})
+        tool.add("data.bin", desc="大文件", detail=["完整描述"], git_ignore=True)
+        tool.render()
+        errors, _ = tool.check()
+        self.assertEqual(
+            [e for e in errors if "data.bin" in e],
+            ["E: data.bin git-ignore 条目磁盘不存在"],
+        )
+
+    def test_check_reports_tracked_contradiction(self):
+        # 标记 git-ignore 但实际被 git 跟踪：矛盾态（tracked ⊆ git_files，差集循环不可见，须单独拦截）
+        base = {"apps/main.tsx", "apps/util.ts", "Cargo.toml"}
+        tool = self.make_tool(git_files=base | {"data.bin"}, tracked_files=base | {"data.bin"})
+        self.write_disk(tool, "data.bin")
+        tool.add("data.bin", desc="大文件", detail=["完整描述"], git_ignore=True)
+        tool.render()
+        errors, _ = tool.check()
+        self.assertEqual(
+            [e for e in errors if "data.bin" in e],
+            ["E: data.bin 标记 git-ignore 但实际被 git 跟踪（git rm --cached 或移除标记恢复对照）"],
+        )
+
+    def test_check_reports_unignored_untracked(self):
+        # 磁盘存在、未跟踪、但 .gitignore 没覆盖（git status 会持续显示 untracked）→ 错误
+        base = {"apps/main.tsx", "apps/util.ts", "Cargo.toml"}
+        tool = self.make_tool(git_files=base | {"data.bin"}, tracked_files=base)
+        self.write_disk(tool, "data.bin")
+        tool.add("data.bin", desc="大文件", detail=["完整描述"], git_ignore=True)
+        tool.render()
+        errors, _ = tool.check()
+        self.assertEqual(
+            [e for e in errors if "data.bin" in e],
+            ["E: data.bin 标记 git-ignore 但未被 .gitignore 排除（补 ignore 规则或移除标记）"],
+        )
+
+    def test_dir_git_ignore_exempts_subtree(self):
+        # 目录标记 → 子树文件条目继承豁免；子树外条目照旧对照
+        tool = self.make_tool(git_files={"apps/main.tsx", "apps/util.ts", "Cargo.toml"})
+        self.write_disk(tool, "datasets/a.bin")
+        self.write_disk(tool, "apps/gone.tsx")
+        tool.add("datasets", desc="数据集", is_dir_entry=True, git_ignore=True)
+        tool.add("datasets/a.bin", desc="数据", detail=["完整描述"])
+        tool.add("apps/gone.tsx", desc="未豁免", detail=["完整描述"])
+        tool.render()
+        errors, _ = tool.check()
+        self.assertFalse(any("datasets" in e for e in errors), errors)  # 子树豁免生效
+        self.assertTrue(any("apps/gone.tsx" in e and "未被 git 跟踪" in e for e in errors), errors)
+
+    def test_git_ignore_keeps_render_and_query(self):
+        # 校验控制字段不影响渲染：简版树照常显示；get / query --json 可见
+        tool = self.make_tool(git_files={"apps/main.tsx", "apps/util.ts", "Cargo.toml"})
+        self.write_disk(tool, "data.bin")
+        tool.add("data.bin", desc="大文件", detail=["完整描述"], git_ignore=True)
+        tool.render()
+        self.assertIn("data.bin", tool.render_brief_tree())
+        self.assertIs(tool.get("data.bin")["git-ignore"], True)
+        import contextlib
+        import io
+        import types
+
+        args = types.SimpleNamespace(kw="data.bin", tag=None, rel_of=None, json=True)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _cmd_query(tool, args)
+        payload = json.loads(buf.getvalue())
+        self.assertIs(payload[0]["git-ignore"], True)
 
 
 class GitDirTest(unittest.TestCase):

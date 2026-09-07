@@ -23,6 +23,7 @@ python .agents/skills/file-tree/scripts/tree_tool.py <命令>
 # 新增/更新条目（upsert：未给的字段保留旧值；自动建父目录，写后自动渲染）
 add <path> -d "一句话≤20字" [--detail "完整描述行"]... [--rel 相关路径]... [--tags a,b] [--dir]
            [--collapsed|--no-collapsed] [--hidden|--no-hidden]   # 渲染控制，见条目字段；--dir 收录目录条目，见核心约定·目录收录粒度
+           [--git-ignore|--no-git-ignore]                        # 豁免 git 跟踪对照（收录 .gitignore 排除的本地文件），见条目字段
 
 # 批量 upsert（JSON 清单）：一份清单 = 一次数据变更 = 一步撤销历史；任一条非法整批拒绝
 add-batch <manifest.json>         # {"entries": [{"path": "a.ts", "desc": "简介"}, {"path": "assets/icons", "desc": "图标集", "dir": true}]}，条目字段同 add
@@ -62,12 +63,15 @@ root [<名字>|--clear]            # 查看/固定/清除渲染根名；未固�
 | `tags` | string[]，可选 | 受控标签，必须已在词表登记（词表渲染于 AGENTS.md 词表块） |
 | `collapsed` | bool，目录可选 | 简版树折叠渲染：目录行带 `…` 不展开 children；默认 false（false 不落盘）。仅目录可用，文件条目报错 |
 | `hidden` | bool，可选 | 简版树隐藏渲染：条目及整个子树不出现在 AGENTS.md；默认 false（false 不落盘）。文件与目录均可用 |
+| `git-ignore` | bool，可选 | 豁免"必须被 git 跟踪"的对照，用于收录不走 git 版本控制的本地文件（如大体积产物）；默认 false（false 不落盘）。check 改为只校验磁盘存在，并要求确实排除在 git 之外（实际被跟踪、或未被 .gitignore 覆盖均报错）。目录标记时子树文件条目继承豁免 |
 | `children` | object | 目录子条目；有此键即目录 |
 | `dir` | bool，add/add-batch 命令标志（非落盘字段） | 收录为目录条目，落盘体现为 `children` 键；磁盘上是目录的路径未声明时自动识别为目录条目并打印提示 |
 
 **字段完整性检测**：`check` 对每个条目做全量字段校验——未知字段、字段类型错误、缺 `desc` 报为错误；`desc` 为空或超长、文件条目缺 `detail` 报为告警（`--strict` 下告警也视为失败）。`collapsed`/`hidden` 类型不是布尔、文件条目带 `collapsed` 报为错误。技能目录内自身测试产生的 `__pycache__` 豁免"未收录"告警（运行时缓存）；仓库其他位置的 `__pycache__` 照常报。
 
 **渲染控制只影响展示**：`collapsed`/`hidden` 仅改变 AGENTS.md 简版树的渲染形态——tree.json 数据始终全量，`get`/`query` 照常可查，`check` 的磁盘对照与产物一致性校验也不受影响（隐藏 ≠ 删除，隐藏条目漏录磁盘文件照样报错）。
+
+**git-ignore 只改校验口径，不改展示**：简版树照常渲染豁免条目，`get`/`query` 照常可查。`check` 对豁免条目不要求被 git 跟踪，但磁盘必须存在；同时反向校验排除态——实际被 git 跟踪（标记与实况矛盾），或未被跟踪但 `.gitignore` 没有覆盖（git status 会持续显示 untracked，易被 `git add .` 误收）均报错，错误消息给出修正出路（`git rm --cached` / 补 ignore 规则 / 移除标记）。
 
 ## 渲染产物索引
 
