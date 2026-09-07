@@ -935,7 +935,6 @@ class MarkTest(SandboxTest):
 
     def test_errors(self):
         tool = self.make_mark_tool()
-        before = tool.tree_json.read_bytes()
         with self.assertRaises(ToolError):  # 目录条目不存在
             tool.mark("nope", tags=["doc"])
         with self.assertRaises(ToolError):  # 文件条目不能作为锚点
