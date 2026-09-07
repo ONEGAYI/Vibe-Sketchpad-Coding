@@ -63,7 +63,7 @@ root [<名字>|--clear]            # 查看/固定/清除渲染根名；未固�
 | `tags` | string[]，可选 | 受控标签，必须已在词表登记（词表渲染于 AGENTS.md 词表块） |
 | `collapsed` | bool，目录可选 | 简版树折叠渲染：目录行带 `…` 不展开 children；默认 false（false 不落盘）。仅目录可用，文件条目报错 |
 | `hidden` | bool，可选 | 简版树隐藏渲染：条目及整个子树不出现在 AGENTS.md；默认 false（false 不落盘）。文件与目录均可用 |
-| `git-ignore` | bool，可选 | 豁免"必须被 git 跟踪"的对照，用于收录不走 git 版本控制的本地文件（如大体积产物）；默认 false（false 不落盘）。check 改为只校验磁盘存在，并要求确实排除在 git 之外（实际被跟踪、或未被 .gitignore 覆盖均报错）。目录标记时子树文件条目继承豁免 |
+| `git-ignore` | bool，可选 | 豁免"必须被 git 跟踪"的对照，用于收录不走 git 版本控制的本地文件（如大体积产物）。check 改为只校验磁盘存在，并要求确实排除在 git 之外（实际被跟踪、或未被 .gitignore 覆盖均报错）。继承就近覆写：有效值取沿祖先链最近一次显式设置，显式 `false` 让子条目/子树退出祖先豁免（如 `!` 反排除规则下走 git 的个别文件）；true/false 均落盘，缺省不落盘 = 继承 |
 | `children` | object | 目录子条目；有此键即目录 |
 | `dir` | bool，add/add-batch 命令标志（非落盘字段） | 收录为目录条目，落盘体现为 `children` 键；磁盘上是目录的路径未声明时自动识别为目录条目并打印提示 |
 
@@ -71,7 +71,7 @@ root [<名字>|--clear]            # 查看/固定/清除渲染根名；未固�
 
 **渲染控制只影响展示**：`collapsed`/`hidden` 仅改变 AGENTS.md 简版树的渲染形态——tree.json 数据始终全量，`get`/`query` 照常可查，`check` 的磁盘对照与产物一致性校验也不受影响（隐藏 ≠ 删除，隐藏条目漏录磁盘文件照样报错）。
 
-**git-ignore 只改校验口径，不改展示**：简版树照常渲染豁免条目，`get`/`query` 照常可查。`check` 对豁免条目不要求被 git 跟踪，但磁盘必须存在；同时反向校验排除态——实际被 git 跟踪（标记与实况矛盾），或未被跟踪但 `.gitignore` 没有覆盖（git status 会持续显示 untracked，易被 `git add .` 误收）均报错，错误消息给出修正出路（`git rm --cached` / 补 ignore 规则 / 移除标记）。
+**git-ignore 只改校验口径，不改展示**：简版树照常渲染豁免条目，`get`/`query` 照常可查。`check` 对豁免条目不要求被 git 跟踪，但磁盘必须存在；同时反向校验排除态——实际被 git 跟踪（标记与实况矛盾），或未被跟踪但 `.gitignore` 没有覆盖（git status 会持续显示 untracked，易被 `git add .` 误收）均报错，错误消息给出修正出路（`git rm --cached` / 补 ignore 规则 / 移除标记）。继承就近覆写：祖先标记 `true` 后，子条目可用显式 `false`（`--no-git-ignore`）退出豁免、其子树跟随；缺省（键不落盘）= 继承祖先。
 
 ## 渲染产物索引
 

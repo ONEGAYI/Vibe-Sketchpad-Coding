@@ -150,10 +150,13 @@ class NormalizeTest(unittest.TestCase):
     def test_git_ignore_flag_canonical(self):
         node = {"desc": "x", "git-ignore": False}
         out = normalize_data({"tags": {}, "tree": {"n": node}})
-        self.assertEqual(list(out["tree"]["n"]), ["kind", "desc"])  # false 默认值不落盘
-        node = {"desc": "x", "hidden": True, "git-ignore": True}
+        # git-ignore 三态：键在即显式设置，true/false 均落盘（false 覆写祖先豁免）；缺省不落盘 = 继承
+        self.assertEqual(list(out["tree"]["n"]), ["kind", "desc", "git-ignore"])
+        self.assertIs(out["tree"]["n"]["git-ignore"], False)
+        node = {"desc": "x", "hidden": False, "git-ignore": True}
         out = normalize_data({"tags": {}, "tree": {"n": node}})
-        self.assertEqual(list(out["tree"]["n"]), ["kind", "desc", "hidden", "git-ignore"])  # hidden 之后、children 之前
+        # hidden 维持旧惯例（false 默认值不落盘），仅 git-ignore 特殊
+        self.assertEqual(list(out["tree"]["n"]), ["kind", "desc", "git-ignore"])
         with self.assertRaises(ToolError):  # 非 bool 拒绝（同 collapsed/hidden）
             normalize_data({"tags": {}, "tree": {"n": {"desc": "x", "git-ignore": "yes"}}})
 
@@ -652,8 +655,9 @@ class GitIgnoreTest(SandboxTest):
         self.assertIs(tool.get("data.bin")["git-ignore"], True)
         tool.add("data.bin", desc="大文件")  # 未指定的标志保留
         self.assertIs(tool.get("data.bin")["git-ignore"], True)
-        tool.add("data.bin", desc="大文件", git_ignore=False)  # 显式 false 撤销
-        self.assertNotIn("git-ignore", tool.get("data.bin"))
+        # 显式 false 落盘（覆写祖先豁免用），与 collapsed/hidden 的"清除"语义不同
+        tool.add("data.bin", desc="大文件", git_ignore=False)
+        self.assertIs(tool.get("data.bin")["git-ignore"], False)
 
     def test_add_batch_git_ignore_field(self):
         tool = self.make_tool(data={"tags": {}, "tree": {}})
@@ -663,7 +667,7 @@ class GitIgnoreTest(SandboxTest):
         ]
         tool.add_batch(entries)
         self.assertIs(tool.get("data.bin")["git-ignore"], True)
-        self.assertNotIn("git-ignore", tool.get("pkg.zip"))
+        self.assertIs(tool.get("pkg.zip")["git-ignore"], False)  # 显式 false 同样落盘
 
     def test_check_passes_when_ignored_on_disk(self):
         # 磁盘存在 + 不在 git_files（被 .gitignore 忽略）→ 通过，不报"未被 git 跟踪"
@@ -722,6 +726,34 @@ class GitIgnoreTest(SandboxTest):
         errors, _ = tool.check()
         self.assertFalse(any("datasets" in e for e in errors), errors)  # 子树豁免生效
         self.assertTrue(any("apps/gone.tsx" in e and "未被 git 跟踪" in e for e in errors), errors)
+
+    def test_explicit_false_overrides_ancestor(self):
+        # .gitignore ! 规则场景：目录整体豁免但个别子文件走 git（tracked）。
+        # 继承会把 tracked 子文件卷进豁免集合 → 误报矛盾；显式 false 就近覆写后恢复正常对照
+        base = {"apps/main.tsx", "apps/util.ts", "Cargo.toml"}
+        tool = self.make_tool(git_files=base | {"datasets/README.md"},
+                              tracked_files=base | {"datasets/README.md"})
+        self.write_disk(tool, "datasets/README.md")
+        tool.add("datasets", desc="数据集", is_dir_entry=True, git_ignore=True)
+        tool.add("datasets/README.md", desc="说明", detail=["完整描述"])  # 无显式设置 → 继承 true
+        tool.render()
+        errors, _ = tool.check()
+        self.assertTrue(any("README.md" in e and "被 git 跟踪" in e for e in errors), errors)  # 缺口基准：误报
+        tool.add("datasets/README.md", desc="说明", git_ignore=False)  # 显式 false 覆写
+        tool.render()
+        errors, _ = tool.check()
+        self.assertFalse(any("README.md" in e for e in errors), errors)  # 误报消除
+
+    def test_false_inherits_down_subtree(self):
+        # 就近覆写向下传递：爷 true + 中间目录 false + 孙无显式设置 → 孙不豁免
+        tool = self.make_tool(git_files={"apps/main.tsx", "apps/util.ts", "Cargo.toml"})
+        self.write_disk(tool, "datasets/sub/x.bin")
+        tool.add("datasets", desc="数据集", is_dir_entry=True, git_ignore=True)
+        tool.add("datasets/sub", desc="例外子集", is_dir_entry=True, git_ignore=False)
+        tool.add("datasets/sub/x.bin", desc="数据", detail=["完整描述"])
+        tool.render()
+        errors, _ = tool.check()
+        self.assertTrue(any("x.bin" in e and "未被 git 跟踪" in e for e in errors), errors)
 
     def test_git_ignore_keeps_render_and_query(self):
         # 校验控制字段不影响渲染：简版树照常显示；get / query --json 可见

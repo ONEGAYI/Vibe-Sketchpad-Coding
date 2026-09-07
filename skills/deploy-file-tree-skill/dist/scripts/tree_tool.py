@@ -14,8 +14,10 @@ AGENTS.md 不存在则生成最小骨架。detail 完整描述只存于 tree.jso
 两者默认 false（不落盘），数据、查询与 check 校验始终全量不受影响。
 校验控制字段 git-ignore=true 则豁免"必须被 git 跟踪"的对照（收录 .gitignore
 排除的本地文件，如大体积产物）：check 只校验磁盘存在，并要求确实排除在
-git 之外（未被跟踪且被 ignore 规则覆盖，二者违反其一均报错）；目录标记时
-子树文件条目继承豁免；默认 false（不落盘），数据、查询与渲染不受影响。
+git 之外（未被跟踪且被 ignore 规则覆盖，二者违反其一均报错）。继承为就近
+覆写：有效值取沿祖先链（含自身）最近一次显式设置，显式 false 可让子条目/
+子树退出祖先豁免（true/false 均落盘，缺省不落盘 = 继承），数据、查询与
+渲染不受影响。
 仓库内其他手写文件树惰性对待：以本技能 tree.json 的查询结果为准，
 不主动同步维护它们。
 
@@ -138,11 +140,15 @@ def _normalize_node(node: dict) -> dict:
             cleaned = sorted(set(value), key=sort_key)
             if cleaned:
                 out[field] = cleaned
-        elif field in ("collapsed", "hidden", "git-ignore"):
+        elif field in ("collapsed", "hidden"):
             if not isinstance(value, bool):
                 raise ToolError(f"{field} 必须是布尔值: {value!r}")
             if value:
                 out[field] = True  # false 为默认值，不落盘
+        elif field == "git-ignore":
+            if not isinstance(value, bool):
+                raise ToolError(f"git-ignore 必须是布尔值: {value!r}")
+            out["git-ignore"] = value  # 三态：键在即显式设置（false 覆写祖先豁免），缺省不落盘 = 继承
         elif field == "children":
             if not isinstance(value, dict):
                 raise ToolError(f"children 必须是对象: {value!r}")
@@ -451,10 +457,7 @@ class TreeTool:
             else:
                 node.pop("hidden", None)
         if git_ignore is not None:
-            if git_ignore:
-                node["git-ignore"] = True
-            else:
-                node.pop("git-ignore", None)
+            node["git-ignore"] = git_ignore  # 显式 false 也落盘：就近覆写祖先豁免（三态语义见 normalize）
         return note
 
     def _validate_rel(self, data, path, rel) -> None:
@@ -853,16 +856,17 @@ class TreeTool:
         return {line for line in proc.stdout.splitlines() if line.strip()}
 
     def _git_exempt(self, tree: dict, path: str) -> bool:
-        """path 自身或任一祖先目录条目标记 git-ignore（目录标记子树继承豁免）。"""
+        """path 的 git-ignore 有效值：就近覆写——沿祖先链（含自身）最近一次显式设置生效，均缺省则不豁免。"""
+        value = False
         cursor: dict = {"children": tree}
         for part in split_rel_path(path):
             child = cursor["children"].get(part)
             if child is None:
-                return False
-            if child.get("git-ignore"):
-                return True
+                break
+            if "git-ignore" in child:
+                value = child["git-ignore"]
             cursor = child
-        return False
+        return value
 
     def _is_skill_pycache(self, path: str) -> bool:
         """技能目录内的 __pycache__（契约测试运行产物）：运行时缓存，豁免未收录告警。"""
@@ -1111,8 +1115,11 @@ def _cmd_get(tool: TreeTool, args) -> None:
         print("  collapsed: true（简版树折叠渲染，不展开 children）")
     if node.get("hidden"):
         print("  hidden: true（简版树隐藏渲染，条目及子树不出现）")
-    if node.get("git-ignore"):
-        print("  git-ignore: true（豁免 git 跟踪对照，check 只校验磁盘存在与 git 排除态；目录标记子树继承）")
+    if "git-ignore" in node:
+        if node["git-ignore"]:
+            print("  git-ignore: true（豁免 git 跟踪对照，check 只校验磁盘存在与 git 排除态；子树未覆写则继承）")
+        else:
+            print("  git-ignore: false（显式退出祖先豁免，check 恢复必须被 git 跟踪的对照；子树未覆写则同样退出）")
     print(f"  desc: {node.get('desc', '')}")
     if node.get("detail"):
         print("  detail:")
