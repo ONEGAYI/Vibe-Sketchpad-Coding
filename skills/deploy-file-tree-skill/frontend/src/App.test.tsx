@@ -263,6 +263,31 @@ async function settleRefreshGen2() {
   await waitFor(() => expect(screen.getByRole("button", { name: "刷新" })).toBeDefined());
 }
 
+describe("浏览控制层提取前的页面契约", () => {
+  it("树选择与历史共用详情，根面包屑保持当前选择", async () => {
+    render(<App />);
+    await loadInitialGen1();
+    fireEvent.click(screen.getByText("keep.ts"));
+    (await waitForReq("GET", "/api/detail")).resolve(jsonOk(detailPayload(1, "keep.ts", "第一个详情")));
+    await screen.findByText("第一个详情");
+    fireEvent.click(screen.getByText("dirX"));
+    (await waitForReq("GET", "/api/detail")).resolve(jsonOk(detailPayload(1, "dirX", "第二个详情")));
+    await screen.findByText("第二个详情");
+    fireEvent.click(screen.getByRole("button", { name: "← 后退" }));
+    const back = await waitForReq("GET", "/api/detail");
+    expect(back.query.get("path")).toBe("keep.ts");
+    back.resolve(jsonOk(detailPayload(1, "keep.ts", "历史详情")));
+    await screen.findByText("历史详情");
+    fireEvent.click(screen.getByRole("button", { name: "演示仓库" }));
+    expect(screen.getByText("历史详情")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "前进 →" }));
+    const forward = await waitForReq("GET", "/api/detail");
+    expect(forward.query.get("path")).toBe("dirX");
+    forward.resolve(jsonOk(detailPayload(1, "dirX", "恢复第二个详情")));
+    await screen.findByText("恢复第二个详情");
+  });
+});
+
 describe("世代号混用窗口：旧世代响应按 generation 丢弃", () => {
   it("晚到的旧世代 children 响应不得写回缓存：重新展开重新拉取新世代子项", async () => {
     render(<App />);
