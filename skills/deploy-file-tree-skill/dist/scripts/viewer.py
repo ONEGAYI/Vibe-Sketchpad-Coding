@@ -1,13 +1,16 @@
 """独立快照的只读文件树查看器：标准库 HTTP 服务 + 前端静态资源托管。
 
-用法：
+用法:
     python viewer.py <tree.json 路径> [--port N] [--host H]
 
 - 默认绑定 127.0.0.1（G20）：只提供查看器页面资源与快照查询，
   不把任意源码目录作为静态目录暴露；远端访问请自行建立 SSH 隧道。
 - 启动后打印访问地址，按 Ctrl+C 停止。
-- 绝对只读（G04）：无任何写入口，不触发格式转换、不生成撤销历史、
-  不重渲染 AGENTS.md；快照只在整个进程生命周期内读取一次（G13）。
+- 绝对只读（G04）：无任何数据写入口，不触发格式转换、不生成撤销历史、
+  不重渲染 AGENTS.md；快照在内存中持有（G13）。
+- 手动刷新（G12）：POST /api/refresh 从同一路径重读快照并原子替换
+  （数据与索引一起换代，世代号 +1）；新快照非法时明确报错并保留旧数据，
+  绝不写回或修改源文件。替换 tree.json 后刷新即可，无需重启或重新构建。
 - 快照独立（G02）：tree.json 可位于仓库之外，无需源码、.git 或 AGENTS.md。
 """
 
@@ -17,6 +20,7 @@ import argparse
 import json
 import mimetypes
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -47,7 +51,17 @@ MIME_TYPES = {
 
 
 class ViewerServer(ThreadingHTTPServer):
-    """持有内存快照与静态资源目录的服务；请求线程为 daemon，随主进程退出。"""
+    """持有内存快照与静态资源目录的服务；请求线程为 daemon，随主进程退出。
+
+    快照版本管理（G12"同一快照版本"）：
+    - 世代号 generation 从 1 起，每次成功刷新 +1；查询响应统一盖章，
+      前端据此识别回答来自哪个版本、绝不混用；
+    - 刷新 = 从启动时指定的同一路径重读构造新 Snapshot（锁外，读失败
+      保留旧快照），随后仅持锁原子替换引用并递增世代号——替换是单次
+      赋值，任何请求要么全用旧快照、要么全用新快照；
+    - 每个请求经 current() 一次取 (快照, 世代号) 配对引用，保证响应
+      内容与世代号永远一致。
+    """
 
     daemon_threads = True
 
@@ -55,14 +69,45 @@ class ViewerServer(ThreadingHTTPServer):
         self,
         address: tuple[str, int],
         handler: type[BaseHTTPRequestHandler],
+        tree_json: Path,
         snapshot: Snapshot,
         static_dir: Path,
         quiet: bool = False,
     ):
         super().__init__(address, handler)
-        self.snapshot = snapshot
+        self.tree_json = tree_json  # 刷新始终重读这一路径（G12：同一路径替换）
         self.static_dir = static_dir
         self.quiet = quiet
+        self._snapshot = snapshot
+        self._generation = 1
+        self._lock = threading.Lock()
+
+    @property
+    def snapshot(self) -> Snapshot:
+        snapshot, _ = self.current()
+        return snapshot
+
+    @property
+    def generation(self) -> int:
+        with self._lock:
+            return self._generation
+
+    def current(self) -> tuple[Snapshot, int]:
+        """取当前配对版本：同一请求内先调用一次，之后全用这份引用。"""
+        with self._lock:
+            return self._snapshot, self._generation
+
+    def refresh_snapshot(self) -> tuple[Snapshot, int]:
+        """重读同一路径快照；成功才原子替换并递增世代号，失败原样保留。
+
+        构造新 Snapshot 在锁外进行：读文件/建索引期间查询继续走旧快照，
+      不被阻塞；并发刷新时后完成者胜，世代号仍严格递增无混用。
+        """
+        fresh = Snapshot(self.tree_json)  # 失败抛 ViewerError，旧快照不受影响
+        with self._lock:
+            self._snapshot = fresh
+            self._generation += 1
+            return fresh, self._generation
 
 
 class ViewerHandler(BaseHTTPRequestHandler):
@@ -70,14 +115,16 @@ class ViewerHandler(BaseHTTPRequestHandler):
     server_version = "file-tree-viewer/1.0"
 
     # ------------------------------------------------------------------
-    # 路由：/api/* 快照查询；其余路径静态资源；写方法一律 405
+    # 路由：/api/* 快照查询（响应统一带 generation）；POST /api/refresh
+    # 为唯一例外放行的 POST（不触任何数据写入口，仅重读）；其余写方法 405
     # ------------------------------------------------------------------
 
     def do_GET(self):
         parsed = urlsplit(self.path)
         try:
             if parsed.path == "/api/root":
-                self._send_json(200, self.server.snapshot.root_info())
+                snap, gen = self.server.current()
+                self._send_json(200, {"generation": gen, **snap.root_info()})
             elif parsed.path == "/api/children":
                 self._api_children(parse_qs(parsed.query))
             elif parsed.path == "/api/detail":
@@ -92,6 +139,10 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._send_json(exc.status, {"error": str(exc)})
 
     def do_POST(self):
+        parsed = urlsplit(self.path)
+        if parsed.path == "/api/refresh":
+            self._api_refresh()
+            return
         self._reject_write()
 
     def do_PUT(self):
@@ -106,22 +157,44 @@ class ViewerHandler(BaseHTTPRequestHandler):
     def _reject_write(self):
         self._send_json(405, {"error": "只读查看器：不支持写请求"})
 
+    def _api_refresh(self):
+        """手动刷新（G12）：重读同一路径；成功原子替换并递增世代号。
+
+        失败（非法 JSON / 结构非法 / 不可读）明确报错且响应带旧世代号与
+        refreshed=false——旧快照保持可用，前端据此标明"未刷新"。
+        这里不向 do_POST 外抛 ViewerError：错误体需要附带旧世代号。
+        """
+        try:
+            snap, gen = self.server.refresh_snapshot()
+        except ViewerError as exc:
+            _, old_gen = self.server.current()
+            self._send_json(
+                exc.status,
+                {"error": str(exc), "generation": old_gen, "refreshed": False},
+            )
+            return
+        self._send_json(200, {"generation": gen, "refreshed": True, **snap.root_info()})
+
     def _api_children(self, query: dict):
+        snap, gen = self.server.current()
         path = (query.get("path") or [""])[0]
-        children = self.server.snapshot.children(path)
-        self._send_json(200, {"path": path, "children": children})
+        children = snap.children(path)
+        self._send_json(200, {"generation": gen, "path": path, "children": children})
 
     def _api_detail(self, query: dict):
+        snap, gen = self.server.current()
         path = (query.get("path") or [""])[0]
         if not path:
             raise ViewerError("缺少 path 参数", 400)
-        self._send_json(200, self.server.snapshot.detail(path))
+        self._send_json(200, {"generation": gen, **snap.detail(path)})
 
     def _api_search(self, query: dict):
         """组合搜索（G08）：kw / tag / under / depth / page / page_size 全部可选。
 
         数值参数非法（非整数、越界）报 400 可读错误；kw/tag/under 空串视为未提供。
         """
+        snap, gen = self.server.current()
+
         def first(name: str) -> str | None:
             value = (query.get(name) or [""])[0].strip()
             return value or None
@@ -143,9 +216,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
         page_size = positive_int("page_size", default=DEFAULT_PAGE_SIZE)
         self._send_json(
             200,
-            self.server.snapshot.search(
-                kw=kw, tag=tag, under=under, depth=depth, page=page, page_size=page_size
-            ),
+            {
+                "generation": gen,
+                **snap.search(
+                    kw=kw, tag=tag, under=under, depth=depth, page=page, page_size=page_size
+                ),
+            },
         )
 
     # ------------------------------------------------------------------
@@ -230,9 +306,10 @@ def create_server(
 
     port=0 时由系统分配空闲端口，实际地址见 server.server_address。
     """
-    snapshot = Snapshot(Path(tree_json))  # 加载失败（ViewerError）直接上抛，不启动服务
+    snapshot_path = Path(tree_json)
+    snapshot = Snapshot(snapshot_path)  # 加载失败（ViewerError）直接上抛，不启动服务
     static = Path(static_dir) if static_dir is not None else DEFAULT_STATIC_DIR
-    return ViewerServer((host, port), ViewerHandler, snapshot, static, quiet)
+    return ViewerServer((host, port), ViewerHandler, snapshot_path, snapshot, static, quiet)
 
 
 def main(argv: list[str] | None = None) -> int:
