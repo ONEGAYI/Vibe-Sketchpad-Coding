@@ -108,9 +108,11 @@ ssh -L 8618:127.0.0.1:8618 user@server
 - 再跑核心验证：`tree_tool_test.py` 全绿 + 真实仓库 `check --strict` 通过；
 - 纪律：**不覆盖系统 Python、不替换系统 glibc、不要求 CentOS 7 本机构建前端**；未在本环境下载安装，候选不等于已支持。
 
-### 跨环境证据矩阵（#22 采集，2026-09-11）
+### 跨环境与浏览器证据矩阵（2026-09-11）
 
-**已验证**（每条有命令与输出出处，详见工单 #22 交付记录）：
+**真浏览器端到端验收（V6–V9，#18–#21 编排层完成）**：ZCode 内置浏览器（UA `Mozilla/5.0 (Windows NT 10.0; Win64; x64) … ZCode/3.11.2 Chrome/146.0.7680.80 Electron/41.0.3`）直连 `python viewer.py <仓库外 tree.json> --port <N>`（服务端 CPython 3.14.0，Windows）。局限如实标注：滚动帧耗时/主观流畅度未量化（人工验收项）；仅 ZCode IAB 环境实测，未覆盖其他浏览器。
+
+**已验证**（每条有命令与输出出处：V1–V5 见工单 #22 交付记录，V6–V9 见 #18–#21 验收记录）：
 
 | # | 环境 | 操作与结果 |
 | --- | --- | --- |
@@ -119,6 +121,10 @@ ssh -L 8618:127.0.0.1:8618 user@server
 | V3 | 本仓库（回归） | `tree_tool_test.py` 226 用例、`viewer_test.py` 111 用例（含新增 5）、`deploy_test.py` 25 用例（含无 Node 部署全链）全部通过；`deploy .` 后实例 `tree.json` 字节未变 |
 | V4 | CentOS-EDA VM（eda@192.168.72.141，真实 VM 非容器）只读探查 | CentOS Linux 7（rpm el7_9）、原生内核 3.10.0-1160.71.1.el7.x86_64、glibc 2.17-326.el7_9、x86_64；系统解释器仅 python3=3.6.8 与 python=2.7.5（无其他现代解释器） |
 | V5 | 同 VM，/tmp 固定样本实测（用完即删） | sha256 校验一致上传 tree_tool.py+样本后：`python3 query --json` → `SyntaxError: future feature annotations is not defined`（`from __future__ import annotations` 需 3.7+）；`python`（2.7.5）→ `SyntaxError: Non-ASCII character`。**结论：CentOS 7 系统解释器无法运行核心工具** |
+| V6 | 真浏览器·基础浏览（#18 验收，快照含中文/三态 git-ignore/悬空 rel/空目录） | 浏览器展开目录、点击文件条目、右栏详情渲染（完整路径、多行转义 detail、悬空 rel「无法定位」、tags、git-ignore 三态）；浏览前后快照 sha256 `56f0667f…23c2e8` 不变 |
+| V7 | 真浏览器·组合搜索与关联（#19 验收） | 组合搜索（关键词+标签）命中渲染；点击命中定位回树（祖先展开+选中）；详情已知关联跳转、「被引用 ←」反向分区正确；悬空关联不可点击；空结果文案与重置正常；快照字节不变 |
+| V8 | 真浏览器·大样本虚拟化与刷新三态（#20 验收，10 万样本合成 110013 条目） | 首屏挂载 13 行 treeitem / 全页 132 个 DOM 元素；展开目录后滚动顶/中/底行窗口移动（首行 .gitignore → mod0494 → mod0979），挂载行数恒定 32–42（远小于 110013，G14 实证）；键盘 ↓↓→↓ 完成选择与进入子级；面包屑显示完整路径；刷新三态：成功（选中保留）/失败（非法 JSON，提示「当前仍显示旧数据（未刷新）」）/恢复（失败提示隐藏） |
+| V9 | 真浏览器·部署实例发行资源（#21 验收，部署实例、dist/viewer/ 发行资源、无 frontend/build） | 页面由受控 assets 加载（`./assets/index-DcBKvQFA.js`），搜索交互正常；快照字节不变 |
 
 **待验证**（不宣称已支持）：
 
