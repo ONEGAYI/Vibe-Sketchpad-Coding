@@ -697,6 +697,147 @@ class ViewerCliTest(unittest.TestCase):
         self.assertEqual(sha256_file(self.snapshot_path), before)
 
 
+class ViewerPreflightTest(unittest.TestCase):
+    """启动前置检查（#22，G21/G22）：必要运行条件缺失时给出可理解错误退出。
+
+    - Python 版本门槛用 sys.version_info 检测：低于 MIN_PYTHON 拒绝启动并
+      说明当前/所需版本，不后台尝试升级运行时；
+    - 快照路径是目录（存在但不是文件）与"不存在"分开报错；
+    - 发行静态资源缺失：启动横幅提示构建方法，页面降级 503，API 保持可用
+      （#21 已合入的降级契约，本票补 CLI 级证据）。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.snapshot_path = Path(self.tmp.name) / "tree.json"
+        self.snapshot_path.write_text(
+            compact_dumps(make_snapshot_data()), encoding="utf-8", newline="\n"
+        )
+
+    def run_cli(self, *args, timeout=30):
+        return subprocess.run(
+            [sys.executable, str(VIEWER_ENTRY), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+
+    def test_python_version_gate_passes_on_current_interpreter(self):
+        # 当前解释器（实测环境）必须通过门槛；门槛本身只升不降见实现注释
+        self.assertIsNone(viewer.python_version_error())
+
+    def test_python_version_gate_message_for_old_version(self):
+        message = viewer.python_version_error((3, 7, 15, "final", 0))
+        self.assertIsNotNone(message)
+        self.assertIn("3.7.15", message)  # 如实报告当前版本
+        self.assertIn("3.8", message)  # 如实报告门槛版本
+        self.assertIn("不会自动升级", message)  # 明说不后台升级运行时
+
+    def test_cli_python_version_below_minimum_refuses_to_start(self):
+        # 篡改门槛为不可能满足的版本，走完整 main() 启动路径
+        code = (
+            "import sys; sys.path.insert(0, {dir!r}); import viewer; "
+            "viewer.MIN_PYTHON = (99, 0); "
+            "sys.exit(viewer.main([{snap!r}]))"
+        ).format(dir=str(VIEWER_ENTRY.parent), snap=str(self.snapshot_path))
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 2)
+        combined = result.stderr + result.stdout
+        self.assertIn("无法启动查看器", combined)
+        self.assertIn("Python 版本过低", combined)
+        self.assertIn("99.0", combined)  # 门槛值动态进消息，不硬编码
+
+    def test_cli_directory_as_snapshot_refuses_to_start(self):
+        result = self.run_cli(self.tmp.name)  # 目录不是快照文件
+        self.assertEqual(result.returncode, 2)
+        combined = result.stderr + result.stdout
+        self.assertIn("无法启动查看器", combined)
+        self.assertIn("不是文件", combined)  # 与"不存在"分开的可理解错误
+
+    def test_cli_missing_static_resources_warns_and_api_alive(self):
+        # 静态目录置空：启动仍打印访问地址与资源缺失提示（含构建方法），
+        # 页面 503、API 正常回答——降级运行契约
+        empty_static = Path(self.tmp.name) / "no-static"
+        empty_static.mkdir()
+        code = (
+            "import sys; sys.path.insert(0, {dir!r}); import viewer; "
+            "viewer.DEFAULT_STATIC_DIR = {static!r}; "
+            "sys.exit(viewer.main([{snap!r}, '--port', '0']))"
+        ).format(
+            dir=str(VIEWER_ENTRY.parent),
+            static=str(empty_static),
+            snap=str(self.snapshot_path),
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        self.addCleanup(proc.terminate)
+        lines: list[str] = []
+        reader = threading.Thread(target=lambda: lines.extend(proc.stdout or []), daemon=True)
+        reader.start()
+
+        port = None
+        deadline = time.time() + 20
+        while time.time() < deadline and port is None:
+            for line in list(lines):
+                match = re.search(r"http://127\.0\.0\.1:(\d+)/", line)
+                if match:
+                    port = int(match.group(1))
+                    break
+            if port is None and proc.poll() is not None:
+                break
+            time.sleep(0.1)
+        self.assertIsNotNone(port, f"静态缺失时应降级启动并打印地址，输出: {lines}")
+        self.assertTrue(
+            any("发行页面资源缺失" in line for line in lines),
+            f"应打印资源缺失提示，输出: {lines}",
+        )
+        self.assertTrue(
+            any("npm run build" in line for line in lines),
+            "缺失提示应包含构建方法",
+        )
+
+        # 页面 503（含构建指引），API 保持可用
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        try:
+            conn.request("GET", "/")
+            resp = conn.getresponse()
+            body = resp.read().decode("utf-8")
+            self.assertEqual(resp.status, 503)
+            self.assertIn("npm run build", body)
+            conn.request("GET", "/api/root")
+            resp = conn.getresponse()
+            payload = json.loads(resp.read().decode("utf-8"))
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(payload["counts"], COUNTS)
+        finally:
+            conn.close()
+
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        reader.join(timeout=2)
+        if proc.stdout:
+            proc.stdout.close()
+
+
 # ---------------------------------------------------------------------------
 # 搜索与关联（#19）：组合筛选 / 分页 / 反向关联 / 与核心 query 语义对照
 # ---------------------------------------------------------------------------

@@ -36,6 +36,10 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STATIC_DIR = SKILL_ROOT / "viewer"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8618
+# 启动门槛（G21/G22/G23）：低于该版本拒绝启动并给可理解错误。
+# 这是必要条件而非兼容承诺——实际支持范围以文档中的实测矩阵为准，
+# 未实测的版本不宣称支持；门槛只随"确认需要更高特性"而升，不凭空抬高。
+MIN_PYTHON = (3, 8)
 
 MIME_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -299,6 +303,23 @@ class ViewerHandler(BaseHTTPRequestHandler):
         super().log_message(format, *args)
 
 
+def python_version_error(version_info=None) -> str | None:
+    """检测解释器是否达到启动门槛（G21/G22）；合格返回 None，否则返回用户可读错误。
+
+    用 sys.version_info 而非语法推断：门槛是启动的必要条件，具体支持
+    范围以实测矩阵为准（G23），不从"语法能解析"推导兼容承诺。
+    """
+    info = sys.version_info if version_info is None else version_info
+    if tuple(info[:3]) < MIN_PYTHON:
+        current = ".".join(str(part) for part in info[:3])
+        required = ".".join(str(part) for part in MIN_PYTHON)
+        return (
+            f"Python 版本过低：当前 {current}，需要 {required}+。"
+            "请安装满足要求的 Python 后重试（查看器不会自动升级运行时）"
+        )
+    return None
+
+
 def create_server(
     tree_json: Path | str,
     host: str = DEFAULT_HOST,
@@ -312,7 +333,7 @@ def create_server(
     """
     snapshot_path = Path(tree_json)
     snapshot = Snapshot(snapshot_path)  # 加载失败（ViewerError）直接上抛，不启动服务
-    static = Path(static_dir) if static_dir is not None else DEFAULT_STATIC_DIR
+    static = Path(static_dir if static_dir is not None else DEFAULT_STATIC_DIR)
     return ViewerServer((host, port), ViewerHandler, snapshot_path, snapshot, static, quiet)
 
 
@@ -326,7 +347,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--port", type=int, default=DEFAULT_PORT, help=f"监听端口（默认 {DEFAULT_PORT}，0 表示随机）"
     )
-    args = parser.parse_args(argv)
 
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -334,9 +354,22 @@ def main(argv: list[str] | None = None) -> int:
         except (AttributeError, ValueError, OSError):
             pass
 
+    # 启动前置检查（G21/G22）：必要运行条件缺失时给可理解错误退出，
+    # 不在后台尝试升级系统运行时；版本门槛先于参数解析——旧解释器上
+    # 用户最先需要知道的是版本不满足，而不是用法错误
+    version_error = python_version_error()
+    if version_error is not None:
+        print(f"无法启动查看器：{version_error}", file=sys.stderr)
+        return 2
+
+    args = parser.parse_args(argv)
+
     snapshot_path = Path(args.tree_json)
-    if not snapshot_path.is_file():
+    if not snapshot_path.exists():
         print(f"无法启动查看器：快照文件不存在: {snapshot_path}", file=sys.stderr)
+        return 2
+    if not snapshot_path.is_file():
+        print(f"无法启动查看器：快照路径不是文件: {snapshot_path}", file=sys.stderr)
         return 2
     try:
         server = create_server(snapshot_path, host=args.host, port=args.port)

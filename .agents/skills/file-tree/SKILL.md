@@ -84,14 +84,17 @@ root [<名字>|--clear]            # 查看/固定/清除渲染根名；未固�
 
 ## 只读查看器（GUI）
 
-浏览快照不必读 JSON 原文：技能自带只读网页查看器，**运行只需 Python 3 与现代浏览器，无需 Node**（页面发行资源随技能部署在技能目录 `viewer/`）：
+浏览快照不必读 JSON 原文：技能自带只读网页查看器，**运行只需 Python 3.8+ 与现代浏览器，无需 Node**（页面发行资源随技能部署在技能目录 `viewer/`）：
 
 ```bash
 python .agents/skills/file-tree/scripts/viewer.py <tree.json 路径> [--port N] [--host H]
 ```
 
-- 启动后打印访问地址（默认 `http://127.0.0.1:8618/`），按 Ctrl+C 停止；默认只监听本机，远端访问请自行建立 SSH 隧道
-- 快照可位于仓库之外（如从旧机 SCP 拉来的 JSON），无需源码、`.git` 或 AGENTS.md
+- 启动门槛 **Python 3.8+**：低于即拒绝启动并打印当前/所需版本（不后台升级运行时）；快照不存在/路径是目录给可理解错误退出；静态资源缺失打印构建方法并降级（页面 503、API 可用）。门槛是必要条件，实测环境 Python 3.14.0，更低版本未实测不宣称支持
+- 启动后打印访问地址（默认 `http://127.0.0.1:8618/`），按 Ctrl+C 停止；默认只监听本机，远端访问请自行建立 SSH 隧道：`ssh -L 8618:127.0.0.1:8618 user@server`，工作站浏览器访问 `http://127.0.0.1:8618/`
+- 快照可位于仓库之外（如从旧机 SCP 拉来的 JSON），无需源码、`.git` 或 AGENTS.md；**复制 JSON 本身不需要 Python**——只有旧机运行核心工具（add/check/query…）和现代机运行查看器才需要 Python
 - 绝对只读：浏览、搜索、刷新不写数据、不触发格式转换、不生成撤销历史
 - **替换 tree.json 后在页面点刷新即可**（重读同一路径），不必重新构建或重启
 - 大样本生成与服务端性能基准（仅构建/实测场景）：`scripts/gen_viewer_sample.py` / `scripts/bench_viewer.py`；查看器契约测试 `python .agents/skills/file-tree/scripts/viewer_test.py`
+
+CentOS 7 等旧环境运行核心工具的解释器候选与跨环境验证矩阵见母体技能（deploy-file-tree-skill）SKILL.md"跨环境浏览与 Python 边界"节；系统 Python 3.6.8/2.7.5 实测无法运行核心工具，独立解释器方案待旧环境实测。

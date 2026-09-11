@@ -9,7 +9,8 @@
 - **deploy**：把 file-tree 技能装进目标仓库（默认 `.agents/skills/file-tree/`）。首次部署复制固定清单九件与 `dist/viewer/` 静态资源、初始化空 `tree.json`（新紧凑规范格式）、渲染 AGENTS.md 标记块；已有技能时为升级模式——以 dist 为准镜像同步，清理旧残留文件（含过期 hash 静态资源）与 `__pycache__`
 - **update-dist**：应急回收——从任意仓库的部署实例提取固定清单刷新 dist（散落改动未主线化时用，常规迭代不走此命令）
 - 数据与历史保护：目标仓库的 `tree.json` 与撤销历史永不覆盖、永不清理；`tree.json` 为规范旧排版（两空格缩进）时升级保留原字节不改写（GUI 资源随技能安装同样不提前转换），下次正常写入自动转换为新紧凑格式，仅结构不规范（如缺派生 `kind`）才做规范化迁移；部署后自检失败则整体报错，不留半成品
-- 查看器发行（G16/G18）：`frontend/` 下 `npm run build` 一键完成 vite 构建与 `dist/viewer/` 组装（幂等镜像、外链质量门、旧 hash 清理）；**目标机器运行 GUI 只需 Python 与浏览器，无需 Node / npm install / vite build**
+- 查看器发行（G16/G18）：`frontend/` 下 `npm run build` 一键完成 vite 构建与 `dist/viewer/` 组装（幂等镜像、外链质量门、旧 hash 清理）；**目标机器运行 GUI 只需 Python 3.8+（启动门槛）与现代浏览器，无需 Node / npm install / vite build**
+- 跨环境路径（G20–G23）：旧机 SCP/SFTP 复制 JSON（无需 Python）→ 现代机 viewer.py 浏览；旧机运行核心工具需兼容 Python（CentOS 7 系统 3.6.8 实测拒绝运行，独立解释器候选与证据矩阵见 SKILL.md"跨环境浏览与 Python 边界"节）
 
 ## 用法
 
