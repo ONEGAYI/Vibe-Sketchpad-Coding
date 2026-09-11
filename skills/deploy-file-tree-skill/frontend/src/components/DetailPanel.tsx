@@ -9,6 +9,8 @@ interface DetailPanelProps {
   loading: boolean;
   /** 关联跳转：沿正向/反向关联定位到目标条目（展开祖先并选中） */
   onNavigate: (path: string) => void;
+  condensed?: boolean;
+  onReadFull?: () => void;
 }
 
 /** 关联引用行：已知条目可点击跳转；悬空目标标记"无法定位"且不可点击。 */
@@ -31,7 +33,7 @@ function RelRefItem({ item, onNavigate }: { item: RelRef; onNavigate: (path: str
 }
 
 /** 右栏：未选择时显示快照概览；选择后显示条目详情（路径/desc/detail/tags/双向关联/标志）。 */
-export function DetailPanel({ rootInfo, detail, selected, loading, onNavigate }: DetailPanelProps) {
+export function DetailPanel({ rootInfo, detail, selected, loading, onNavigate, condensed = false, onReadFull }: DetailPanelProps) {
   if (selected === null) {
     return (
       <section className="panel detail" aria-label="详情">
@@ -73,7 +75,7 @@ export function DetailPanel({ rootInfo, detail, selected, loading, onNavigate }:
 
   const tagDict = rootInfo?.tags ?? {};
   return (
-    <section className="panel detail" aria-label="详情">
+    <section className={`panel detail${condensed ? " detail-summary" : ""}`} aria-label="详情">
       <header className="detail-header">
         <h2>
           <EntryIcon kind={detail.kind} />
@@ -99,6 +101,7 @@ export function DetailPanel({ rootInfo, detail, selected, loading, onNavigate }:
 
       <p className="entry-kind muted">{detail.kind === "dir" ? `目录 · ${detail.child_count ?? 0} 个子项` : "文件"}</p>
       <p className="detail-lead">{detail.desc || "（待补）"}</p>
+      {condensed && <button className="read-full link-button" type="button" onClick={onReadFull}>收起并阅读全文</button>}
       {detail.detail.length > 0 && (
         <section className="detail-section">
           <h3>完整描述</h3>

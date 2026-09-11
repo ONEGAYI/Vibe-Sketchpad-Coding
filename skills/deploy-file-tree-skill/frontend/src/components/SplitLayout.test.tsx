@@ -56,4 +56,17 @@ describe("普通侧栏限位", () => {
     fireEvent.pointerMove(separator, { pointerId: 1, clientX: 200 });
     expect(separator.getAttribute("aria-valuenow")).toBe("440");
   });
+
+  it("按钮模式占可用宽80%，关闭后恢复普通首选宽度", () => {
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({ width: 1009 } as DOMRect);
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    const { rerender, container } = render(<SplitLayout><div /><div /></SplitLayout>);
+    fireEvent.keyDown(screen.getByRole("separator"), { key: "ArrowRight" });
+    rerender(<SplitLayout expanded><div /><div /></SplitLayout>);
+    expect((container.querySelector("main") as HTMLElement).style.getPropertyValue("--sidebar-width")).toBe("800px");
+    expect(screen.getByRole("separator").getAttribute("aria-disabled")).toBe("true");
+    fireEvent.keyDown(screen.getByRole("separator"), { key: "ArrowLeft" });
+    rerender(<SplitLayout><div /><div /></SplitLayout>);
+    expect(screen.getByRole("separator").getAttribute("aria-valuenow")).toBe("320");
+  });
 });

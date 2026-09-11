@@ -4,7 +4,7 @@
  * 请求携带新 epoch 但内容属旧快照，晚到时照样通过 epoch 检查混入新界面。
  * 以下用例模拟该窗口：按 response.generation 比对已知世代，旧世代响应
  * （children 缓存回写 / search / detail）必须被丢弃，旧子项不得复活。 */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, createEvent, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import type { ChildEntry } from "./types";
@@ -263,7 +263,80 @@ async function settleRefreshGen2() {
   await waitFor(() => expect(screen.getByRole("button", { name: "刷新" })).toBeDefined());
 }
 
-describe("浏览控制层提取前的页面契约", () => {
+describe("浏览布局与控制层页面契约", () => {
+  it("切换浏览布局保留搜索结果及输入草稿", async () => {
+    render(<App />);
+    await loadInitialGen1();
+    fireEvent.change(screen.getByLabelText("关键词"), { target: { value: "keep" } });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    (await waitForReq("GET", "/api/search")).resolve(jsonOk(searchPayload(1, "keep", "搜索命中")));
+    await screen.findByText("搜索命中");
+    fireEvent.change(screen.getByLabelText("关键词"), { target: { value: "未提交草稿" } });
+    fireEvent.click(screen.getByRole("button", { name: "层级浏览" }));
+    expect(screen.getByText("搜索命中")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "收起层级" }));
+    expect(screen.getByText("搜索命中")).toBeDefined();
+    expect((screen.getByLabelText("关键词") as HTMLInputElement).value).toBe("未提交草稿");
+  });
+  it("列目录请求失败可重试，空目录区别于加载失败", async () => {
+    render(<App />);
+    await loadInitialGen1();
+    fireEvent.click(screen.getByRole("button", { name: "层级浏览" }));
+    fireEvent.click(screen.getByRole("option", { name: /dirX/ }));
+    (await waitForReq("GET", "/api/children", (q) => q.get("path") === "dirX")).resolve(jsonErr(500, "读取暂时失败"));
+    await screen.findByText("加载失败");
+    const retry = screen.getByRole("button", { name: "重试" });
+    const enter = createEvent.keyDown(retry, { key: "Enter", bubbles: true, cancelable: true });
+    fireEvent(retry, enter);
+    expect(enter.defaultPrevented).toBe(false);
+    fireEvent.click(retry);
+    (await waitForReq("GET", "/api/children", (q) => q.get("path") === "dirX")).resolve(jsonOk({ generation: 1, path: "dirX", children: [] }));
+    await screen.findByText("空目录");
+    expect(screen.queryByText("加载失败")).toBeNull();
+  });
+
+  it("列键盘进入和返回时转移真实焦点，大目录保持虚拟化", async () => {
+    render(<App />);
+    await loadInitialGen1();
+    fireEvent.click(screen.getByRole("button", { name: "层级浏览" }));
+    const rootColumn = document.querySelector('[data-column-path=""]') as HTMLElement;
+    rootColumn.focus();
+    fireEvent.keyDown(rootColumn, { key: "Home" });
+    (await waitForReq("GET", "/api/children", (q) => q.get("path") === "dirX")).resolve(jsonOk({
+      generation: 1, path: "dirX", children: Array.from({ length: 100000 }, (_, i) => fileEntry(`dirX/file-${i}.ts`, "说明")),
+    }));
+    fireEvent.keyDown(rootColumn, { key: "ArrowRight" });
+    await waitFor(() => expect(document.activeElement?.getAttribute("data-column-path")).toBe("dirX"));
+    await screen.findByRole("option", { name: /file-0.ts/ });
+    expect(document.querySelectorAll("[data-column-entry]").length).toBeLessThan(100);
+    const childColumn = document.activeElement as HTMLElement;
+    fireEvent.keyDown(childColumn, { key: "End" });
+    await waitFor(() => expect(document.querySelector('[data-column-entry="dirX/file-99999.ts"]')?.getAttribute("aria-selected")).toBe("true"));
+    fireEvent.keyDown(childColumn, { key: "ArrowLeft" });
+    await waitFor(() => expect(document.activeElement?.getAttribute("data-column-path")).toBe(""));
+  });
+
+  it("层级切换保留选中和历史，晚到子项不能恢复旧分支", async () => {
+    render(<App />);
+    await loadInitialGen1();
+    fireEvent.click(screen.getByText("keep.ts"));
+    (await waitForReq("GET", "/api/detail")).resolve(jsonOk(detailPayload(1, "keep.ts", "原选中")));
+    await screen.findByText("原选中");
+    fireEvent.click(screen.getByRole("button", { name: "层级浏览" }));
+    fireEvent.click(screen.getByRole("option", { name: /dirX/ }));
+    const late = await waitForReq("GET", "/api/children", (q) => q.get("path") === "dirX");
+    const oldDetail = await waitForReq("GET", "/api/detail", (q) => q.get("path") === "dirX");
+    fireEvent.click(screen.getByRole("option", { name: /keep.ts/ }));
+    oldDetail.resolve(jsonOk(detailPayload(1, "dirX", "迟到详情")));
+    late.resolve(jsonOk({ generation: 1, path: "dirX", children: [fileEntry("dirX/late.ts", "旧分支")] }));
+    await waitFor(() => expect(document.querySelector('[data-column-path="dirX"]')).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "收起层级" }));
+    expect(document.querySelector('[data-tree-row][data-path="keep.ts"]')?.getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "← 后退" }));
+    const restored = await waitForReq("GET", "/api/detail", (q) => q.get("path") === "dirX");
+    restored.resolve(jsonOk(detailPayload(1, "dirX", "历史中的目录")));
+    await screen.findByText("历史中的目录");
+  });
   it("树选择与历史共用详情，根面包屑保持当前选择", async () => {
     render(<App />);
     await loadInitialGen1();

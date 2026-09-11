@@ -7,6 +7,9 @@ import { SearchResults } from "./components/SearchResults";
 import { Breadcrumb } from "./components/Breadcrumb";
 import { HelpPanel } from "./components/HelpPanel";
 import { SplitLayout } from "./components/SplitLayout";
+import { ColumnBrowser } from "./components/ColumnBrowser";
+import drawerOpen from "./assets/drawer-open.svg";
+import drawerClosed from "./assets/drawer-closed.svg";
 import "./index.css";
 
 const ROOT_PLACEHOLDER = "文件树查看器";
@@ -14,14 +17,16 @@ const ROOT_PLACEHOLDER = "文件树查看器";
 /** 页面装配与帮助交互；浏览状态统一由控制层持有。 */
 export default function App() {
   const {
-    rootInfo, expanded, selected, detail, detailLoading,
+    rootInfo, childrenCache, childrenState, expanded, selected, detail, detailLoading,
     error, notice, leftView, searchResult, searchLoading, refreshing,
     visibleRows, selectedIndex, rootChildren, canGoBack, canGoForward,
     back, forward, showTree, dismissError, dismissNotice,
     onRowClick, onToggle, navigateTo, onTreeKeyDown, onSearch,
-    onPageChange, onHitClick, doRefresh,
+    onPageChange, onHitClick, doRefresh, ensureChildren, revealSelection,
   } = useTreeBrowser();
   const [helpOpen, setHelpOpen] = useState(false);
+  const [hierarchyOpen, setHierarchyOpen] = useState(false);
+  const collapseHierarchy = () => { revealSelection(); setHierarchyOpen(false); };
 
   // 全局快捷键：Alt+←/→ 历史导航、? 帮助、Esc 关帮助（输入控件内不劫持）
   useEffect(() => {
@@ -117,9 +122,16 @@ export default function App() {
         </div>
       )}
 
-      <SplitLayout>
+      <SplitLayout expanded={hierarchyOpen}>
         <nav className="panel tree" aria-label="目录树">
-          <div className="nav-heading">文件导航<span className="muted">只读快照</span></div>
+          <div className="nav-heading"><span>文件导航</span>
+            <button type="button" className="drawer-switch" aria-pressed={hierarchyOpen}
+              title={hierarchyOpen ? "收起层级浏览，恢复普通侧栏宽度" : "展开抽屉，以多列层级浏览目录"}
+              onClick={() => { if (hierarchyOpen) collapseHierarchy(); else setHierarchyOpen(true); }}>
+              <img src={hierarchyOpen ? drawerOpen : drawerClosed} alt="" />
+              {hierarchyOpen ? "收起层级" : "层级浏览"}
+            </button>
+          </div>
           {leftView === "search" && searchResult !== null ? (
             <SearchResults
               resp={searchResult}
@@ -128,6 +140,9 @@ export default function App() {
               onBackToTree={showTree}
               loading={searchLoading}
             />
+          ) : hierarchyOpen ? (
+            <ColumnBrowser selected={selected} detail={detail} cache={childrenCache} states={childrenState}
+              ensureChildren={ensureChildren} onSelect={onRowClick} />
           ) : rootChildren === undefined ? (
             <p className="muted loading">加载中…</p>
           ) : rootChildren.length === 0 ? (
@@ -145,6 +160,8 @@ export default function App() {
           )}
         </nav>
         <DetailPanel
+          condensed={hierarchyOpen}
+          onReadFull={collapseHierarchy}
           rootInfo={rootInfo}
           detail={detail}
           selected={selected}

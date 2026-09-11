@@ -20,10 +20,13 @@ import { existsInCache, reconcileAfterRefresh } from "./refreshReconcile";
 
 /** 浏览状态与请求的唯一入口；组件只能调用领域动作，不暴露内部 setter。 */
 type LeftView = "tree" | "search";
+export type ChildrenLoadState = { status: "loading" | "error" | "missing"; message?: string };
 
 export function useTreeBrowser() {
   const [rootInfo, setRootInfo] = useState<RootInfo | null>(null);
   const [childrenCache, setChildrenCache] = useState<Map<string, ChildEntry[]>>(new Map());
+  const [childrenState, setChildrenState] = useState<Map<string, ChildrenLoadState>>(new Map());
+  const childrenRequests = useRef(new Map<string, { epoch: number; promise: Promise<boolean> }>());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [history, setHistory] = useState<SelectionHistory>(emptyHistory());
   const [detail, setDetail] = useState<EntryDetail | null>(null);
@@ -125,13 +128,33 @@ export function useTreeBrowser() {
   const loadChildren = useCallback(
     (dir: string) => {
       const epoch = epochGuard.current();
-      return api.children(dir).then((resp) => {
-        if (!epochGuard.isCurrent(epoch)) return;
-        if (generationGate.isStale(resp.generation)) return;
+      const active = childrenRequests.current.get(dir);
+      if (active?.epoch === epoch) return active.promise;
+      setChildrenState((current) => new Map(current).set(dir, { status: "loading" }));
+      const promise = api.children(dir).then((resp) => {
+        if (!epochGuard.isCurrent(epoch)) return false;
+        if (generationGate.isStale(resp.generation)) {
+          setChildrenState((current) => new Map(current).set(dir, { status: "error", message: "快照已更新，请重试" }));
+          return false;
+        }
         setChildrenCache((cur) =>
           cur.has(dir) ? cur : new Map(cur).set(dir, resp.children),
         );
+        setChildrenState((current) => { const next = new Map(current); next.delete(dir); return next; });
+        return true;
+      }).catch((err) => {
+        if (epochGuard.isCurrent(epoch)) {
+          setChildrenState((current) => new Map(current).set(dir, {
+            status: err instanceof ApiError && err.status === 404 ? "missing" : "error",
+            message: err instanceof Error ? err.message : String(err),
+          }));
+        }
+        throw err;
+      }).finally(() => {
+        if (childrenRequests.current.get(dir)?.promise === promise) childrenRequests.current.delete(dir);
       });
+      childrenRequests.current.set(dir, { epoch, promise });
+      return promise;
     },
     [epochGuard, generationGate],
   );
@@ -181,7 +204,7 @@ export function useTreeBrowser() {
       const epoch = epochGuard.current();
       try {
         for (const dir of ancestors(path)) {
-          if (!childrenCache.has(dir)) await loadChildren(dir);
+          if (!childrenCache.has(dir) && !(await loadChildren(dir))) return;
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
@@ -202,6 +225,7 @@ export function useTreeBrowser() {
   /** 树容器键盘导航（G10）：↑↓ 选择、→ 展开/进入、← 折叠/跳父、Home/End。 */
   const onTreeKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (e.altKey || e.ctrlKey || e.metaKey) return;
       const rows = flattenVisibleRows(childrenCache, expanded);
       const selIndex = selected !== null ? rowIndexByPath(rows, selected) : null;
       const action = handleTreeKey(e.key, rows, expanded, selIndex);
@@ -280,6 +304,7 @@ export function useTreeBrowser() {
     setRefreshing(true);
     setNotice(null);
     const epoch = epochGuard.bump();
+    setChildrenState(new Map());
     detailSeq.current += 1; // 作废在途详情请求
     const searchSeqAtStart = searchSeq.current; // B3：刷新发起时的搜索序
     try {
@@ -385,6 +410,15 @@ export function useTreeBrowser() {
 
   const rootChildren = childrenCache.get("");
 
+  /** 补齐树的祖先展开意图，不改变选中、历史或搜索内容。 */
+  const revealSelection = useCallback(() => {
+    if (!selected) return;
+    setExpanded((current) => new Set([...current, ...ancestors(selected)]));
+    for (const dir of ancestors(selected)) {
+      if (!childrenCache.has(dir)) void loadChildren(dir).catch(() => {});
+    }
+  }, [selected, childrenCache, loadChildren]);
+
   const back = useCallback(() => setHistory((h) => goBack(h)), []);
   const forward = useCallback(() => setHistory((h) => goForward(h)), []);
   const showTree = useCallback(() => setLeftView("tree"), []);
@@ -392,13 +426,14 @@ export function useTreeBrowser() {
   const dismissNotice = useCallback(() => setNotice(null), []);
 
   return {
-    rootInfo, childrenCache, expanded, selected, detail, detailLoading,
+    rootInfo, childrenCache, childrenState, expanded, selected, detail, detailLoading,
     error, notice, leftView, searchResult, searchLoading, refreshing,
     visibleRows, selectedIndex, rootChildren,
     canGoBack: canGoBack(history), canGoForward: canGoForward(history),
     back, forward, showTree, dismissError, dismissNotice,
     onRowClick, onToggle, navigateTo, onTreeKeyDown, onSearch,
     onPageChange, onHitClick, doRefresh,
+    ensureChildren: loadChildren, revealSelection,
   };
 }
 
