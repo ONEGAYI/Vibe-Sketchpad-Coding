@@ -438,6 +438,8 @@ class AssembleViewerTest(unittest.TestCase):
         (build / "assets").mkdir(parents=True)
         (build / "assets" / js_name).write_text("console.log(1);", encoding="utf-8")
         (build / "assets" / "style-DeF456.css").write_text("body{}", encoding="utf-8")
+        # Vite public/ 约定产物（如 .gitattributes 行尾锁定）随构建进入 build 根
+        (build / ".gitattributes").write_text("* -text\n", encoding="utf-8", newline="\n")
         (build / "index.html").write_text(
             '<!doctype html><title>v</title>'
             f'<script type="module" src="./assets/{js_name}"></script>'
@@ -459,9 +461,12 @@ class AssembleViewerTest(unittest.TestCase):
                 (dest / "assets" / "app-AbC123.js").read_bytes(),
                 (build / "assets" / "app-AbC123.js").read_bytes(),
             )
+            # public 约定产物（build 根非 hash 文件）照常镜像，重组装不丢失
+            self.assertTrue((dest / ".gitattributes").is_file())
             r2 = self.assemble(build, dest)
             self.assertEqual(r2.returncode, 0, r2.stderr)
             self.assertIn("无变更", r2.stdout)  # 幂等：第二次无复制
+            self.assertTrue((dest / ".gitattributes").is_file())
 
     def test_assemble_cleans_stale_hash(self):
         with tempfile.TemporaryDirectory() as tmp:
