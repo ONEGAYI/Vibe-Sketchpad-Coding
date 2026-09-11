@@ -27,6 +27,9 @@ from tree_tool import (  # noqa: E402
     _cmd_rm_batch,
     _cmd_root,
     default_history_path,
+    dumps_canonical,
+    dumps_canonical_legacy,
+    is_canonical_text,
     normalize_data,
     replace_block,
     resolve_git_dir,
@@ -51,6 +54,22 @@ def make_data() -> dict:
             "Cargo.toml": {"desc": "根配置", "detail": ["workspace 根：成员与依赖版本、release 配置"]},
         },
     }
+
+
+def legacy_dumps(data: dict) -> str:
+    """独立旧编码规则（两空格缩进 + 末尾 LF）：标准库直调，不经被测写入路径。
+
+    专用于构造"结构规范、仅排版旧"的历史样本。
+    """
+    return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+
+
+def compact_dumps(data: dict) -> str:
+    """独立新编码规则（紧凑单行 + 末尾 LF）：标准库直调，与被测实现无转发关系。
+
+    作为参数化用例的独立期望（锁死 separators 组合本身，而非转发实现参数）。
+    """
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
 class SandboxTest(unittest.TestCase):
@@ -2248,6 +2267,267 @@ class CmdRootTest(SandboxTest):
         tool = self.make_tool()
         with self.assertRaises(ToolError):
             _cmd_root(tool, self.make_args(name="X", clear=True))
+
+
+class CompactWriteContractTest(SandboxTest):
+    """新规范写入编码的独立字节契约（规格 F02/F03）。
+
+    期望全部为手写固定字面量（含中文、字符串内空白/换行/转义、空树、末尾 LF），
+    不得用被测 serializer 自己生成唯一期望。
+    """
+
+    def test_exact_bytes_handwritten(self):
+        # 字符串内部空格保真（desc 内空格）、换行/引号/反斜杠以 JSON 转义保真（detail 行）。
+        # 期望为手写转义字面量（\\n 等即 JSON 文本中的两字符转义序列），不经 serializer 生成。
+        data = {
+            "tags": {"文档": "文档类"},
+            "tree": {
+                "说明.md": {
+                    "desc": "中文 说明",
+                    "detail": ["第一行\n第二行 \"引号\" \\ 反斜杠"],
+                    "tags": ["文档"],
+                },
+            },
+        }
+        tool = self.make_tool(data=data)
+        expected = (
+            '{"tags":{"文档":"文档类"},'
+            '"tree":{"说明.md":{"kind":"file","desc":"中文 说明",'
+            '"detail":["第一行\\n第二行 \\"引号\\" \\\\ 反斜杠"],"tags":["文档"]}}}'
+            "\n"
+        ).encode("utf-8")
+        self.assertEqual(tool.tree_json.read_bytes(), expected)
+
+    def test_empty_tree_bytes(self):
+        tool = self.make_tool(data={"tags": {}, "tree": {}})  # 空 tags 词表被规范化剔除
+        self.assertEqual(tool.tree_json.read_bytes(), b'{"tree":{}}\n')
+
+    def test_single_trailing_lf_no_bom_one_line(self):
+        tool = self.make_tool()
+        raw = tool.tree_json.read_bytes()
+        self.assertFalse(raw.startswith(b"\xef\xbb\xbf"))  # UTF-8 无 BOM
+        self.assertTrue(raw.endswith(b"\n"))
+        self.assertFalse(raw.endswith(b"\n\n"))  # 末尾恰好一个 LF
+        self.assertNotIn(b"\n", raw[:-1])  # 正文单行：紧凑无缩进
+
+    def test_root_key_first_in_compact(self):
+        tool = self.make_tool()
+        tool.set_root("固定根")
+        self.assertTrue(tool.tree_json.read_text(encoding="utf-8").startswith('{"root":"固定根",'))
+
+    def test_repeat_write_identical_bytes(self):
+        tool = self.make_tool()
+        first = tool.tree_json.read_bytes()
+        tool.write_data(tool.load())  # 重复写入同一规范化内容
+        self.assertEqual(tool.tree_json.read_bytes(), first)
+
+    def test_dumps_functions_two_forms(self):
+        # 共享判定来源的原料：同一规范化数据恰有两种规范序列化形态
+        data = normalize_data(make_data())
+        self.assertEqual(dumps_canonical(data), compact_dumps(data))
+        self.assertEqual(dumps_canonical_legacy(data), legacy_dumps(data))
+        self.assertNotEqual(dumps_canonical(data), dumps_canonical_legacy(data))
+
+
+class LegacyCheckCompatTest(SandboxTest):
+    """旧两空格规范格式的读取与检查兼容（规格 F04/F05/F06）。
+
+    旧格式样本一律由独立旧编码规则（legacy_dumps）字面构造，不经新的 write_data。
+    """
+
+    def write_legacy(self, tool: TreeTool, data: dict) -> None:
+        tool.tree_json.write_text(legacy_dumps(normalize_data(data)), encoding="utf-8", newline="\n")
+
+    def test_check_strict_accepts_both_formats(self):
+        tool = self.make_tool()
+        tool.render()
+        self.assertEqual(tool.check(strict=True), ([], []))  # 新规范
+        self.write_legacy(tool, make_data())
+        errors, warnings = tool.check(strict=True)  # 旧规范：无格式错误、无 strict 告警
+        self.assertEqual((errors, warnings), ([], []))
+
+    def test_crlf_legacy_also_accepted(self):
+        # CRLF 兼容口径对新旧两种规范形态同时生效
+        tool = self.make_tool()
+        tool.render()
+        self.write_legacy(tool, make_data())
+        raw = tool.tree_json.read_text(encoding="utf-8")
+        tool.tree_json.write_text(raw.replace("\n", "\r\n"), encoding="utf-8", newline="")
+        self.assertEqual(tool.check()[0], [])
+
+    def test_readonly_commands_preserve_legacy_bytes(self):
+        # 查询类命令不因读取触发重写：字节与撤销历史均不动（规格 F04/命令行为矩阵）
+        tool = self.make_tool()
+        self.write_legacy(tool, make_data())
+        tool.render()
+        before = tool.tree_json.read_bytes()
+        tool.get("Cargo.toml")
+        tool.query(kw="入口")
+        tool.history_summary()
+        tool.current_root_name()
+        tool.check()
+        tool.render()
+        self.assertEqual(tool.tree_json.read_bytes(), before)
+        self.assertEqual(tool.history_summary(), ([], []))
+
+    def test_is_canonical_text_two_forms_and_rejections(self):
+        # 单一判定来源：序列化文本级双形态比较，对象相等不足以通过
+        data = normalize_data(make_data())
+        self.assertTrue(is_canonical_text(compact_dumps(data)))
+        self.assertTrue(is_canonical_text(legacy_dumps(data)))
+        self.assertTrue(is_canonical_text(compact_dumps(data).replace("\n", "\r\n")))
+        self.assertTrue(is_canonical_text(legacy_dumps(data).replace("\n", "\r\n")))
+        self.assertFalse(is_canonical_text(json.dumps(data, ensure_ascii=False, indent=4) + "\n"))
+        self.assertFalse(is_canonical_text(json.dumps(data, ensure_ascii=False, separators=(", ", ": ")) + "\n"))
+        self.assertFalse(is_canonical_text(compact_dumps(data).rstrip("\n")))  # 缺末尾 LF
+        self.assertFalse(is_canonical_text(compact_dumps(data) + "\n"))  # 冗余末尾 LF
+        # 键序错乱（对象相等但 tree 在前）与冗余空字段（detail:[]）继续判否
+        reordered = {k: data[k] for k in reversed(list(data))}
+        self.assertFalse(is_canonical_text(compact_dumps(reordered)))
+        self.assertFalse(
+            is_canonical_text(compact_dumps({"tags": {}, "tree": {"a.rs": {"kind": "file", "desc": "x", "detail": []}}}))
+        )
+        self.assertFalse(is_canonical_text("not json"))
+        self.assertFalse(is_canonical_text('{"tree":"不是对象"}\n'))  # 结构非法
+
+    def test_check_rejects_disallowed_layouts(self):
+        # 其余排版一律拒绝：对象相等不放行任意缩进/键序/空字段（规格 F06）
+        data = normalize_data(make_data())
+        variants = {
+            "indent-4": json.dumps(data, ensure_ascii=False, indent=4) + "\n",
+            "keys-reordered": compact_dumps({k: data[k] for k in reversed(list(data))}),
+            "spaced-separators": json.dumps(data, ensure_ascii=False, separators=(", ", ": ")) + "\n",
+            "empty-detail-kept": compact_dumps(
+                {"tags": {}, "tree": {"a.rs": {"kind": "file", "desc": "x", "detail": []}}}
+            ),
+            "missing-trailing-lf": compact_dumps(data).rstrip("\n"),
+        }
+        for name, text in variants.items():
+            with self.subTest(variant=name):
+                tool = self.make_tool()
+                tool.render()
+                tool.tree_json.write_text(text, encoding="utf-8", newline="\n")
+                errors, _ = tool.check()
+                self.assertTrue(any("规范" in e for e in errors), text[:60])
+
+
+class WriteMigrationTest(SandboxTest):
+    """旧格式延迟转换：真正写入时输出新规范，拒绝操作不迁移，undo/redo 保持新规范（F07/F08/F09）。"""
+
+    def write_legacy(self, tool: TreeTool, data: dict) -> None:
+        tool.tree_json.write_text(legacy_dumps(normalize_data(data)), encoding="utf-8", newline="\n")
+
+    def make_legacy_tool(self, data: dict | None = None) -> TreeTool:
+        tool = self.make_tool(data=data)
+        self.write_legacy(tool, data if data is not None else make_data())
+        return tool
+
+    def assert_compact_on_disk(self, tool: TreeTool) -> None:
+        text = tool.tree_json.read_text(encoding="utf-8")
+        self.assertNotIn("\n", text[:-1])  # 正文单行
+        self.assertEqual(text, compact_dumps(json.loads(text)))  # 与独立新编码规则逐字节一致
+
+    def test_every_write_category_converts(self):
+        # 参数化覆盖全部写入类别：任一现有写入入口在旧格式样本上落盘均为新规范
+        cases = {
+            "add": lambda t: t.add("apps/new.rs", desc="新增", detail=["完整"]),
+            "rm": lambda t: t.rm("Cargo.toml"),
+            "mv": lambda t: t.mv("Cargo.toml", "conf/Cargo.toml"),
+            "add-batch": lambda t: t.add_batch(
+                [{"path": "a.rs", "desc": "a", "detail": ["x"]}, {"path": "b.rs", "desc": "b", "detail": ["y"]}]
+            ),
+            "rm-batch": lambda t: t.rm_batch(["apps/main.tsx", "apps/util.ts"]),
+            "mv-batch": lambda t: t.mv_batch([{"src": "Cargo.toml", "dst": "x/Cargo.toml"}]),
+            "mark": lambda t: t.mark("apps", tags=["test"]),
+            "tag-add": lambda t: t.tag_add("新标签", "说明"),
+            "tag-rm": lambda t: t.tag_rm("test"),  # test 标签未被条目使用，可删
+            "root-set": lambda t: t.set_root("固定名"),
+            "root-clear": lambda t: t.clear_root(),
+        }
+        for name, op in cases.items():
+            with self.subTest(op=name):
+                data = make_data()
+                if name == "root-clear":
+                    data["root"] = "旧名"  # clear 需已有自定义根名
+                tool = self.make_legacy_tool(data)
+                op(tool)
+                self.assert_compact_on_disk(tool)
+                undo_ops, redo_ops = tool.history_summary()
+                self.assertEqual((len(undo_ops), redo_ops), (1, []))  # 批量也只记一步历史
+
+    def test_undo_redo_after_migration_stay_compact(self):
+        # 旧格式 → 业务写入 → undo → redo：三次落盘均新规范，迁移不占历史步（规格 F09）
+        tool = self.make_legacy_tool()
+        original = normalize_data(make_data())
+        tool.add("apps/new.rs", desc="新增", detail=["完整"])
+        self.assertIn("new.rs", tool.load()["tree"]["apps"]["children"])
+        self.assert_compact_on_disk(tool)  # 落盘 1：业务写入转新规范
+        op = tool.undo()
+        self.assertEqual(op, "add apps/new.rs")
+        self.assertEqual(tool.load(), original)  # 撤销恢复业务数据
+        self.assert_compact_on_disk(tool)  # 落盘 2：undo 不退回旧排版
+        self.assertEqual(tool.history_summary(), ([], ["add apps/new.rs"]))
+        tool.redo()
+        self.assertIn("new.rs", tool.load()["tree"]["apps"]["children"])
+        self.assert_compact_on_disk(tool)  # 落盘 3：redo 新规范
+        undo_ops, redo_ops = tool.history_summary()
+        self.assertEqual((len(undo_ops), len(redo_ops)), (1, 0))  # 全程仅一步业务历史
+
+    def test_rejected_operations_keep_legacy_bytes(self):
+        # 写入前拒绝的操作不触发预先迁移：旧文件字节与历史状态保持原样（规格 F08）
+        tool = self.make_legacy_tool()
+        cases = {
+            "add-bad-path": lambda t: t.add("a/../x.rs", desc="x"),
+            "add-unknown-tag": lambda t: t.add("y.rs", desc="y", tags=["nope"]),
+            "mv-dst-exists": lambda t: t.mv("Cargo.toml", "apps/main.tsx"),
+            "rm-missing": lambda t: t.rm("nope.rs"),
+            "add-batch-unknown-field": lambda t: t.add_batch([{"path": "a.rs", "desc": "a", "bogus": 1}]),
+            "rm-batch-missing": lambda t: t.rm_batch(["apps/main.tsx", "nope.rs"]),
+            "mv-batch-bad-entry": lambda t: t.mv_batch([{"src": "Cargo.toml"}]),
+            "mark-file-anchor": lambda t: t.mark("Cargo.toml", tags=["test"]),
+            "mark-no-action": lambda t: t.mark("apps"),
+            "tag-add-exists": lambda t: t.tag_add("pure", "重复"),
+            "tag-rm-in-use": lambda t: t.tag_rm("pure"),
+            "root-empty": lambda t: t.set_root(""),
+            "root-clear-unset": lambda t: t.clear_root(),
+            "undo-empty": lambda t: t.undo(),
+        }
+        before = tool.tree_json.read_bytes()
+        for name, op in cases.items():
+            with self.subTest(op=name):
+                with self.assertRaises(ToolError):
+                    op(tool)
+                self.assertEqual(tool.tree_json.read_bytes(), before)
+        self.assertEqual(tool.history_summary(), ([], []))
+
+
+class DisplayStabilityTest(SandboxTest):
+    """展示接口稳定（规格 F13）：query --json 与 AGENTS.md 渲染不因数据排版新旧而改变。"""
+
+    def test_query_json_and_render_same_across_formats(self):
+        import contextlib
+        import io
+        import types
+
+        compact_tool = self.make_tool()
+        legacy_tool = self.make_tool()
+        legacy_tool.tree_json.write_text(
+            legacy_dumps(normalize_data(make_data())), encoding="utf-8", newline="\n"
+        )
+        args = types.SimpleNamespace(kw=None, tag=None, rel_of=None, under=None, depth=None, json=True)
+        outputs = []
+        for tool in (compact_tool, legacy_tool):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _cmd_query(tool, args)
+            outputs.append(buf.getvalue())
+        self.assertEqual(outputs[0], outputs[1])
+        compact_tool.render()
+        legacy_tool.render()
+        self.assertEqual(
+            compact_tool.agents_md.read_text(encoding="utf-8"),
+            legacy_tool.agents_md.read_text(encoding="utf-8"),
+        )
 
 
 class SelfHostTest(unittest.TestCase):
