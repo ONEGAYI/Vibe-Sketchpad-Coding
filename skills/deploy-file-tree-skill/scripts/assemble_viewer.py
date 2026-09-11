@@ -99,6 +99,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--build", default=str(DEFAULT_BUILD), help="vite 构建产物目录")
     parser.add_argument("--dest", default=str(DEFAULT_DEST), help="发行快照目标目录")
     args = parser.parse_args(argv)
+    # #23 审查 C3 自伤防护：清理逻辑会删除 dest 下构建产物之外的文件，
+    # --dest 误指技能根等非空目录会连带删除脚本。非默认目标要求为空或
+    # 不存在；默认 dist/viewer 不受限（受控发行快照本就非空、需幂等重组装）
+    if args.dest != str(DEFAULT_DEST):
+        dest = Path(args.dest)
+        if dest.is_dir() and any(dest.iterdir()):
+            print(
+                f"错误: 非默认 --dest 目标目录非空，拒绝组装（清理阶段会删除其中"
+                f"构建产物之外的文件）: {dest}",
+                file=sys.stderr,
+            )
+            return 2
     try:
         log = assemble(Path(args.build), Path(args.dest))
     except AssembleError as exc:

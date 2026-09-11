@@ -216,6 +216,15 @@ class SnapshotLoadTest(unittest.TestCase):
                     Snapshot(self.write_snapshot(text))
                 self.assertIn("结构校验失败", str(ctx.exception))
 
+    def test_deeply_nested_json_raises_readable_viewer_error(self):
+        # 数万层嵌套 JSON 使 json.loads（或 normalize_data）触发
+        # RecursionError：必须包装为可读 ViewerError(400)，不得裸 traceback
+        deep = "[" * 100_000 + "]" * 100_000
+        with self.assertRaises(ViewerError) as ctx:
+            Snapshot(self.write_snapshot(deep))
+        self.assertEqual(ctx.exception.status, 400)
+        self.assertIn("嵌套层级过深", str(ctx.exception))
+
     def test_load_does_not_touch_disk(self):
         path = self.write_snapshot(legacy_dumps(make_snapshot_data()))
         before = sha256_file(path)
@@ -620,6 +629,99 @@ class StaticServingTest(HttpServerBase):
 # ---------------------------------------------------------------------------
 
 
+class HostHeaderCheckTest(unittest.TestCase):
+    """默认绑定下的 Host 头校验（#23 审查 C2，防 DNS rebinding）：
+
+    恶意域名解析到 127.0.0.1 后浏览器请求仍携带恶意 Host——默认绑定
+    （127.0.0.1）必须只接受回环地址形态的 Host，否则 403 并说明出路；
+    显式 --host 自定义绑定视为用户已自行开放网络暴露，跳过校验。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile as _tf
+
+        cls.tmp = _tf.TemporaryDirectory()
+        cls.dir = Path(cls.tmp.name)
+        cls.snapshot_path = cls.dir / "tree.json"
+        cls.snapshot_path.write_text(
+            compact_dumps(make_snapshot_data()), encoding="utf-8", newline="\n"
+        )
+        cls._extra = _tf.TemporaryDirectory()
+        cls.static_dir = Path(cls._extra.name) / "viewer"
+        cls.static_dir.mkdir(parents=True)
+        (cls.static_dir / "index.html").write_text(
+            "<!doctype html><title>v</title>", encoding="utf-8", newline="\n"
+        )
+        # 默认绑定（127.0.0.1）服务：Host 校验开启
+        cls.server = viewer.create_server(
+            tree_json=cls.snapshot_path, port=0, static_dir=cls.static_dir, quiet=True
+        )
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.host, cls.port = cls.server.server_address[:2]
+        # 显式自定义绑定（0.0.0.0）：Host 校验关闭
+        cls.custom = viewer.create_server(
+            tree_json=cls.snapshot_path,
+            host="0.0.0.0",
+            port=0,
+            static_dir=cls.static_dir,
+            quiet=True,
+        )
+        cls.custom_thread = threading.Thread(target=cls.custom.serve_forever, daemon=True)
+        cls.custom_thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+        cls.custom.shutdown()
+        cls.custom.server_close()
+        cls.custom_thread.join(timeout=5)
+        cls._extra.cleanup()
+        cls.tmp.cleanup()
+
+    def fetch(self, host_header: str, path: str = "/api/root", server=None):
+        target = server if server is not None else self.server
+        addr_host, addr_port = target.server_address[:2]
+        if addr_host in ("0.0.0.0", "::"):  # Windows 不允许连接通配地址本身
+            addr_host = "127.0.0.1"
+        conn = http.client.HTTPConnection(addr_host, addr_port, timeout=10)
+        try:
+            conn.request("GET", path, headers={"Host": host_header})
+            resp = conn.getresponse()
+            return resp.status, resp.getheader("Content-Type"), resp.read()
+        finally:
+            conn.close()
+
+    def test_default_bind_rejects_foreign_host_on_api_and_page(self):
+        for path in ("/api/root", "/"):
+            with self.subTest(path=path):
+                status, ctype, body = self.fetch("evil.example.com", path=path)
+                self.assertEqual(status, 403)
+                self.assertIn("application/json", ctype or "")
+                payload = json.loads(body.decode("utf-8"))
+                self.assertIn("Host", payload["error"])
+                self.assertIn("127.0.0.1", payload["error"])  # 说明放行范围
+
+    def test_default_bind_accepts_loopback_host_forms(self):
+        for host_header in (
+            f"127.0.0.1:{self.port}",
+            f"localhost:{self.port}",
+            "localhost",  # 不带端口
+            f"[::1]:{self.port}",
+        ):
+            with self.subTest(host=host_header):
+                status, _, _ = self.fetch(host_header)
+                self.assertEqual(status, 200)
+
+    def test_custom_host_bind_skips_host_check(self):
+        # 显式 --host 自定义绑定：任意 Host 放行（用户已自行承担暴露）
+        status, _, _ = self.fetch("evil.example.com", server=self.custom)
+        self.assertEqual(status, 200)
+
+
 class ViewerCliTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -653,6 +755,16 @@ class ViewerCliTest(unittest.TestCase):
         result = self.run_cli(str(bad))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("JSON", result.stderr + result.stdout)
+
+    def test_cli_deeply_nested_snapshot_refuses_to_start(self):
+        # 深嵌套快照：启动路径收到可读错误（exit 2），不是 RecursionError 裸 traceback
+        deep = Path(self.tmp.name) / "deep.json"
+        deep.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8", newline="\n")
+        result = self.run_cli(str(deep))
+        self.assertEqual(result.returncode, 2)
+        combined = result.stderr + result.stdout
+        self.assertIn("嵌套层级过深", combined)
+        self.assertNotIn("Traceback", combined)
 
     def test_cli_starts_prints_url_and_serves(self):
         before = sha256_file(self.snapshot_path)
@@ -1743,6 +1855,24 @@ class ViewerRefreshApiTest(RefreshHttpTestBase):
         status, payload = self.refresh()
         self.assertEqual(status, 200)
         self.assertEqual(payload["generation"], gen_before + 1)
+
+    def test_refresh_deeply_nested_returns_400_json_keeps_old_snapshot(self):
+        # 深嵌套快照触发 RecursionError：刷新必须返回 400 JSON（旧快照保留），
+        # 不得让未捕获异常冒出导致连接重置
+        gen_before = self.current_generation()
+        self.snapshot_path.write_text(
+            "[" * 100_000 + "]" * 100_000, encoding="utf-8", newline="\n"
+        )
+        status, payload = self.refresh()
+        self.assertEqual(status, 400)
+        self.assertFalse(payload["refreshed"])
+        self.assertIn("嵌套层级过深", payload["error"])
+        self.assertEqual(payload["generation"], gen_before)
+
+        # 旧快照保持可用
+        status, root_payload = self.get_json("/api/root")
+        self.assertEqual(status, 200)
+        self.assertEqual(root_payload["generation"], gen_before)
 
     def test_deleted_path_returns_404_after_refresh(self):
         # 前端回退规则的依据：刷新后已删除路径的详情/子项查询明确 404

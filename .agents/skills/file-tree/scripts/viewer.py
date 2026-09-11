@@ -89,11 +89,16 @@ class ViewerServer(ThreadingHTTPServer):
         snapshot: Snapshot,
         static_dir: Path,
         quiet: bool = False,
+        host_check: bool = False,
     ):
         super().__init__(address, handler)
         self.tree_json = tree_json  # 刷新始终重读这一路径（G12：同一路径替换）
         self.static_dir = static_dir
         self.quiet = quiet
+        # 默认绑定（127.0.0.1）时开启 Host 头校验（#23 审查 C2，防 DNS
+        # rebinding 读取本地快照）；显式 --host 自定义绑定视为用户自行开放
+        # 网络暴露，跳过校验（文档另有 SSH 隧道方案）
+        self.host_check = host_check
         self._snapshot = snapshot
         self._generation = 1
         self._lock = threading.Lock()
@@ -136,6 +141,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------
 
     def do_GET(self):
+        if self._reject_bad_host():
+            return
         parsed = urlsplit(self.path)
         try:
             if parsed.path == "/api/root":
@@ -155,6 +162,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._send_json(exc.status, {"error": str(exc)})
 
     def do_POST(self):
+        if self._reject_bad_host():
+            return
         parsed = urlsplit(self.path)
         if parsed.path == "/api/refresh":
             self._api_refresh()
@@ -162,13 +171,46 @@ class ViewerHandler(BaseHTTPRequestHandler):
         self._reject_write()
 
     def do_PUT(self):
+        if self._reject_bad_host():
+            return
         self._reject_write()
 
     def do_DELETE(self):
+        if self._reject_bad_host():
+            return
         self._reject_write()
 
     def do_PATCH(self):
+        if self._reject_bad_host():
+            return
         self._reject_write()
+
+    def _reject_bad_host(self) -> bool:
+        """默认绑定下校验 Host 头（防 DNS rebinding）；已拒绝时返回 True。
+
+        只接受回环地址形态（127.0.0.1 / localhost / [::1]，可带端口），
+        其余（含缺失）一律 403 并说明放行范围；自定义 --host 绑定跳过。
+        """
+        if not self.server.host_check:
+            return False
+        raw = (self.headers.get("Host") or "").strip()
+        if raw.startswith("["):  # IPv6 字面量 [::1]:port
+            hostname = raw.split("]", 1)[0] + "]"
+        else:
+            host_part, _, port_part = raw.rpartition(":")
+            hostname = host_part if (host_part and port_part.isdigit()) else raw
+        if hostname.lower() in ("127.0.0.1", "localhost", "[::1]"):
+            return False
+        self._send_json(
+            403,
+            {
+                "error": (
+                    "Host 头不在允许范围：默认绑定只接受 127.0.0.1 / localhost / [::1]"
+                    "（防 DNS rebinding）。远端访问请用 SSH 隧道，或以 --host 显式绑定"
+                )
+            },
+        )
+        return True
 
     def _reject_write(self):
         self._send_json(405, {"error": "只读查看器：不支持写请求"})
@@ -342,7 +384,15 @@ def create_server(
     snapshot_path = Path(tree_json)
     snapshot = Snapshot(snapshot_path)  # 加载失败（ViewerError）直接上抛，不启动服务
     static = Path(static_dir if static_dir is not None else DEFAULT_STATIC_DIR)
-    return ViewerServer((host, port), ViewerHandler, snapshot_path, snapshot, static, quiet)
+    return ViewerServer(
+        (host, port),
+        ViewerHandler,
+        snapshot_path,
+        snapshot,
+        static,
+        quiet,
+        host_check=host == DEFAULT_HOST,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
