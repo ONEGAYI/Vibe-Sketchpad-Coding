@@ -650,5 +650,44 @@ class NoNodeLaunchTest(unittest.TestCase):
             proc.stdout.close()
 
 
+class BuildGuideConsistencyTest(unittest.TestCase):
+    """构建指引文案一致性（#23 审查 Standards-3）：viewer.py（503 页与启动
+    提示）、deploy.py、assemble_viewer.py 各持一份模块级常量 BUILD_GUIDE
+    （跨包 import 不可行——部署实例只有 dist 文件），常量必须逐字一致防漂移。
+    """
+
+    @staticmethod
+    def _load_module(path: Path, name: str):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @classmethod
+    def setUpClass(cls):
+        cls.viewer = cls._load_module(DIST / "scripts" / "viewer.py", "_guide_viewer")
+        cls.assemble = cls._load_module(ASSEMBLE_SCRIPT, "_guide_assemble")
+        # deploy 模块已在文件顶部 import（scripts 目录在 sys.path）
+
+    def test_build_guide_constants_identical(self):
+        self.assertEqual(deploy.BUILD_GUIDE, self.viewer.BUILD_GUIDE)
+        self.assertEqual(deploy.BUILD_GUIDE, self.assemble.BUILD_GUIDE)
+
+    def test_build_guide_shape(self):
+        # 单行三步 && 串联：从技能根进入 frontend 起构建链
+        self.assertEqual(
+            deploy.BUILD_GUIDE.split(" && "),
+            ["cd frontend", "npm install", "npm run build"],
+        )
+
+    def test_viewer_503_page_uses_guide(self):
+        # 503 降级页的 <pre> 多行形态由常量派生（&& → 换行），不另写一份
+        html = self.viewer.build_guide_pre_html()
+        self.assertIn("cd frontend", html)
+        self.assertNotIn("&&", html)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,7 +7,8 @@
 - 内存持有（G13）：解析一次建索引，children/detail 按需从内存返回，
   不在每个请求重新解析整份文件；
 - 语义一致：复用 tree_tool 的模块级纯函数（排序/路径校验/目录判据/
-  结构校验），与核心工具的读写语义保持同源。
+  结构校验/节点定位 find_node/git-ignore 有效值 effective_git_ignore），
+  与核心工具的读写语义保持同源，不在此复刻第二份逻辑。
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from tree_tool import (  # noqa: E402
     ToolError,
+    effective_git_ignore,
+    find_node,
     is_dir,
     normalize_data,
     sort_key,
@@ -100,16 +103,10 @@ class Snapshot:
     def find(self, path: str) -> dict | None:
         """按路径定位节点；不存在或路径中段是文件返回 None。
 
-        与 tree_tool._find_node 同语义：沿段下探，目录判据用 children 键
-        （不采信 kind 字段，兼容早于 kind 引入的历史数据）。
+        复用 tree_tool.find_node 公共纯函数（唯一实现）：沿段下探，目录
+        判据用 children 键（不采信 kind 字段，兼容早于 kind 引入的历史数据）。
         """
-        parts = self._parts(path)
-        node: dict = {"children": self.tree}
-        for part in parts:
-            if not is_dir(node) or part not in node["children"]:
-                return None
-            node = node["children"][part]
-        return node
+        return find_node(self.tree, self._parts(path))
 
     def children(self, path: str) -> list[dict]:
         """目录子项摘要列表，按 sort_key 规范序；空 path 表示根级。
@@ -297,19 +294,10 @@ class Snapshot:
         }
 
     def _effective_git_ignore(self, parts: list[str]) -> bool:
-        """git-ignore 有效值：沿祖先链（含自身）最近一次显式设置生效。
+        """git-ignore 有效值：复用 tree_tool.effective_git_ignore（唯一实现）。
 
-        与 tree_tool._git_exempt 同语义；全链缺省则不豁免（False）。
+        沿祖先链（含自身）最近一次显式设置生效；全链缺省则不豁免（False）。
+        parts 非空（detail 对根已提前拒绝），join 回路径串走公共函数的
+        路径拆段与就近覆写逻辑。
         """
-        value = False
-        cursor: dict = {"children": self.tree}
-        for part in parts:
-            if not is_dir(cursor):
-                break  # 中途段是文件条目：无更深的祖先设置可继承
-            child = cursor["children"].get(part)
-            if child is None:
-                break
-            if "git-ignore" in child:
-                value = child["git-ignore"]
-            cursor = child
-        return value
+        return effective_git_ignore(self.tree, "/".join(parts))

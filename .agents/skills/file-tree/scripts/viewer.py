@@ -36,6 +36,15 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STATIC_DIR = SKILL_ROOT / "viewer"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8618
+# 前端构建指引（#23 审查 Standards-3）：与 scripts/deploy.py、
+# scripts/assemble_viewer.py 的同名常量逐字一致（deploy_test.py 锁定）；
+# 跨包 import 不可行——部署实例只携带 dist 文件。
+BUILD_GUIDE = "cd frontend && npm install && npm run build"
+
+
+def build_guide_pre_html() -> str:
+    """503 降级页的多行构建指引（由 BUILD_GUIDE 派生，不另写一份文案）。"""
+    return "<pre>" + "\n".join(BUILD_GUIDE.split(" && ")) + "</pre>"
 # 启动门槛（G21/G22/G23）：低于该版本拒绝启动并给可理解错误。
 # 这是必要条件而非兼容承诺——实际支持范围以文档中的实测矩阵为准，
 # 未实测的版本不宣称支持；门槛只随"确认需要更高特性"而升，不凭空抬高。
@@ -244,9 +253,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 "<h3>前端资源缺失</h3>"
                 "<p>查看器缺少发行页面资源（未找到 index.html）。本目录应为技能自带的"
                 " viewer/ 静态资源；若确为源码形态，请在技能目录执行：</p>"
-                "<pre>cd frontend\n"
-                "npm install\nnpm run build</pre>"
-                "<p>构建并组装到 viewer/ 后重新启动查看器即可浏览；快照查询 API（/api/root 等）当前仍可用。</p>",
+                + build_guide_pre_html()
+                + "<p>构建并组装到 viewer/ 后重新启动查看器即可浏览；快照查询 API（/api/root 等）当前仍可用。</p>",
             )
             return
         rel = unquote(url_path).lstrip("/")
@@ -383,7 +391,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"快照: {snapshot_path}（{counts['total']} 条目：{counts['dirs']} 目录 / {counts['files']} 文件）")
     if not (server.static_dir / "index.html").is_file():
         print(f"提示: 发行页面资源缺失（缺 {server.static_dir / 'index.html'}），页面暂不可用，API 仍可访问")
-        print("      组装方法（需现代构建机的 Node）: cd frontend && npm install && npm run build")
+        print(f"      组装方法（需现代构建机的 Node）: {BUILD_GUIDE}")
     print(f"访问地址: http://{host}:{port}/")
     print("按 Ctrl+C 停止")
     sys.stdout.flush()

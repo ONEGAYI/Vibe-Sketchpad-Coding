@@ -38,6 +38,10 @@ from pathlib import Path
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 DIST = SKILL_ROOT / "dist"
+# 前端构建指引（#23 审查 Standards-3）：与 dist/scripts/viewer.py、
+# scripts/assemble_viewer.py 的同名常量逐字一致（deploy_test.py 锁定）；
+# 跨包 import 不可行——部署实例只携带 dist 文件。
+BUILD_GUIDE = "cd frontend && npm install && npm run build"
 DIST_FILES = (
     "SKILL.md",
     "agents/openai.yaml",
@@ -138,7 +142,7 @@ def deploy(
     if not (dist_root / VIEWER_STATIC_REL / "index.html").is_file():
         log.append(
             "提示: dist/viewer/ 发行静态资源缺失，本次部署不含 GUI 页面"
-            "（组装方法: cd frontend && npm install && npm run build）"
+            f"（组装方法: {BUILD_GUIDE}）"
         )
     _mirror_sync(dist_root, skill_dir, log)
 

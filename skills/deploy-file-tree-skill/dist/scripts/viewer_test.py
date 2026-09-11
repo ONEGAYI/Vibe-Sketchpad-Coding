@@ -25,7 +25,13 @@ from urllib.parse import quote
 sys.path.insert(0, str(Path(__file__).parent))
 
 import viewer  # noqa: E402
-from tree_tool import TreeTool  # noqa: E402
+from tree_tool import (  # noqa: E402
+    TreeTool,
+    effective_git_ignore,
+    find_node,
+    split_rel_path,
+    walk_entries,
+)
 from viewer_core import Snapshot, ViewerError  # noqa: E402
 
 VIEWER_ENTRY = Path(__file__).parent / "viewer.py"
@@ -1330,6 +1336,94 @@ class QueryParityTest(unittest.TestCase):
         self.assertIs(hits["src2"]["git_ignore"], node.get("git-ignore"))  # True 显式豁免
         node_util = core["src/util.ts"]
         self.assertIs(hits["src/util.ts"]["git_ignore"], node_util.get("git-ignore"))
+
+
+class FindAndGitIgnoreParityTest(unittest.TestCase):
+    """节点定位与 git-ignore 有效值的唯一实现对照（#23 审查 Standards-1）。
+
+    Snapshot.find 曾复刻 tree_tool._find_node、_effective_git_ignore 曾复刻
+    TreeTool._git_exempt——两处私有逻辑被提升为 tree_tool 公共纯函数
+    find_node / effective_git_ignore 后，查看器改为复用。本组用例锁定：
+    同快照、同路径，核心实现与查看器行为一致（参照 QueryParityTest 模式，
+    对照基准独立于查看器实现，TreeTool 实例只读快照不触写入口）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.snapshot_path = Path(cls.tmp.name) / "tree.json"
+        # make_snapshot_data 覆盖 git-ignore 三态：exempt=true（豁免目录）、
+        # exempt/inherit.ts（缺省继承 true）、exempt/optout.ts（显式 false 退出）
+        cls.snapshot_path.write_text(
+            compact_dumps(make_snapshot_data()), encoding="utf-8", newline="\n"
+        )
+        cls.snap = Snapshot(cls.snapshot_path)
+        cls.tool = TreeTool(
+            tree_json=cls.snapshot_path,
+            agents_md=cls.snapshot_path.parent / "AGENTS.md",
+            repo_root=cls.snapshot_path.parent,
+            root_name="parity",
+            history_path=cls.snapshot_path.parent / "history.json",
+        )
+        cls.tree = cls.tool.load()["tree"]
+        cls.walk_paths = [path for path, _ in walk_entries(cls.tree, [])]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_find_parity_on_all_walk_paths(self):
+        # walk 序全量路径：核心 find_node 与查看器 Snapshot.find 同找到、同内容
+        for path in self.walk_paths:
+            with self.subTest(path=path):
+                core = find_node(self.tree, split_rel_path(path))
+                self.assertIsNotNone(core)
+                viewer = self.snap.find(path)
+                self.assertIsNotNone(viewer)
+                self.assertEqual(core.get("desc"), viewer.get("desc"))
+
+    def test_find_parity_on_missing_and_file_midway(self):
+        # 不存在路径 / 中段是文件的路径：两条实现同为 None（同防御语义）
+        for path in ("nosuch", "apps/nosuch.ts", "apps/main.tsx/deeper.md", "中文目录/没有.md"):
+            with self.subTest(path=path):
+                self.assertIsNone(find_node(self.tree, split_rel_path(path)))
+                self.assertIsNone(self.snap.find(path))
+
+    def test_find_root_wrapper_parity(self):
+        # 空 path 返回根包装节点（含 children 键）：与核心 parts[:-1]==[] 用法同口径
+        core = find_node(self.tree, [])
+        viewer = self.snap.find("")
+        self.assertIsNotNone(core)
+        self.assertIsNotNone(viewer)
+        self.assertEqual(len(core["children"]), len(self.tree))
+        self.assertEqual(len(viewer["children"]), len(self.tree))
+
+    def test_effective_git_ignore_parity_three_states(self):
+        # 三态 fixture：豁免目录 true / 缺省继承 true / 显式 false 退出 / 无标记 False
+        expected = {
+            "exempt": True,
+            "exempt/inherit.ts": True,
+            "exempt/optout.ts": False,
+            "apps/main.tsx": False,
+            "中文目录/说明.md": False,
+        }
+        for path, value in expected.items():
+            with self.subTest(path=path):
+                self.assertIs(effective_git_ignore(self.tree, path), value)
+                self.assertIs(self.snap.detail(path)["git_ignore"]["effective"], value)
+
+    def test_effective_git_ignore_parity_all_paths(self):
+        # 全量路径对照：detail 的 effective 一律等于核心 effective_git_ignore
+        for path in self.walk_paths:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    self.snap.detail(path)["git_ignore"]["effective"],
+                    effective_git_ignore(self.tree, path),
+                )
+
+    def test_effective_git_ignore_defensive_break_unchanged(self):
+        # 中段是文件的路径：核心 break 语义（无更深祖先可继承，落 False）不因提升而漂移
+        self.assertIs(effective_git_ignore(self.tree, "apps/main.tsx/deeper.md"), False)
 
 
 class SearchMemoryHoldingTest(unittest.TestCase):

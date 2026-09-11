@@ -307,14 +307,38 @@ def render_tree(root_name: str, tree: dict) -> str:
     return "\n".join(lines)
 
 
-def _find_node(tree: dict, parts: list[str]) -> dict | None:
-    """沿段定位节点；不存在或路径中段是文件则返回 None。"""
+def find_node(tree: dict, parts: list[str]) -> dict | None:
+    """沿段定位节点；不存在或路径中段是文件则返回 None。
+
+    公共纯函数：核心工具与 viewer_core 共用的唯一实现（#23 审查
+    Standards-1），只读消费方不得复刻第二份逻辑。
+    """
     node: dict = {"children": tree}
     for part in parts:
         if not is_dir(node) or part not in node["children"]:
             return None
         node = node["children"][part]
     return node
+
+
+def effective_git_ignore(tree: dict, path: str) -> bool:
+    """path 的 git-ignore 有效值：就近覆写——沿祖先链（含自身）最近一次显式设置生效，均缺省则不豁免。
+
+    公共纯函数：核心工具 check 与 viewer_core detail 共用的唯一实现
+    （#23 审查 Standards-1）；path 中段是文件时无更深祖先可继承，落 False。
+    """
+    value = False
+    cursor: dict = {"children": tree}
+    for part in split_rel_path(path):
+        if not is_dir(cursor):
+            break  # 中途段是文件条目：无更深的祖先设置可继承（与 find_node 同防御）
+        child = cursor["children"].get(part)
+        if child is None:
+            break
+        if "git-ignore" in child:
+            value = child["git-ignore"]
+        cursor = child
+    return value
 
 
 class TreeTool:
@@ -432,7 +456,7 @@ class TreeTool:
 
     def get(self, path: str) -> dict:
         parts = split_rel_path(path)
-        node = _find_node(self.load()["tree"], parts)
+        node = find_node(self.load()["tree"], parts)
         if node is None:
             raise ToolError(f"条目不存在: {path}")
         return node
@@ -507,7 +531,7 @@ class TreeTool:
             parts_r = split_rel_path(r)
             if parts_r == split_rel_path(path):
                 raise ToolError(f"rel 不能指向自身: {path}")
-            if _find_node(data["tree"], parts_r) is None:
+            if find_node(data["tree"], parts_r) is None:
                 raise ToolError(f"rel 目标不在树中（先 add 目标或修正路径）: {r}")
 
     def add(self, path, desc=None, detail=None, rel=None, tags=None, is_dir_entry=False, collapsed=None, hidden=None, git_ignore=None) -> None:
@@ -523,7 +547,7 @@ class TreeTool:
 
     def _remove_entry(self, data, parts, path=None) -> None:
         """删除 parts 指向的条目并修剪变空的父目录链（根不删），不落盘。"""
-        parent = _find_node(data["tree"], parts[:-1])  # parts[:-1]==[] 时返回根包装
+        parent = find_node(data["tree"], parts[:-1])  # parts[:-1]==[] 时返回根包装
         if parent is None or not is_dir(parent) or parts[-1] not in parent["children"]:
             raise ToolError(f"条目不存在: {path or '/'.join(parts)}")
         del parent["children"][parts[-1]]
@@ -559,12 +583,12 @@ class TreeTool:
         dst_key = "/".join(dst_parts)
         if dst_key == src_key:
             raise ToolError(f"源与目标相同: {src}")
-        node = _find_node(data["tree"], src_parts)
+        node = find_node(data["tree"], src_parts)
         if node is None:
             raise ToolError(f"条目不存在: {src}")
         if len(dst_parts) > len(src_parts) and dst_parts[: len(src_parts)] == src_parts:
             raise ToolError(f"目标不得位于源子树内（先移出再入内）: {src} ⊃ {dst}")
-        if _find_node(data["tree"], dst_parts) is not None:
+        if find_node(data["tree"], dst_parts) is not None:
             raise ToolError(f"目标条目已存在（mv 不覆盖，覆盖式更新用 add）: {dst}")
         _, dst_parent = self._resolve_for_write(data, dst)
         # 先挂载后摘除：同父重命名且源是父目录唯一孩子时，先摘会把共同父目录修剪后以空骨架重建、丢失其信息
@@ -681,7 +705,7 @@ class TreeTool:
         all_parts = [split_rel_path(p) for p in paths]
         data = self.load()
         for parts in all_parts:  # 预校验全部存在，避免删一半才发现缺失
-            parent = _find_node(data["tree"], parts[:-1])
+            parent = find_node(data["tree"], parts[:-1])
             if parent is None or not is_dir(parent) or parts[-1] not in parent["children"]:
                 raise ToolError(f"条目不存在: {'/'.join(parts)}")
         for parts in all_parts:
@@ -767,7 +791,7 @@ class TreeTool:
             raise ToolError(f"depth 必须是正整数: {depth}")
         parts = split_rel_path(dir_path)
         data = self.load()
-        anchor = _find_node(data["tree"], parts)
+        anchor = find_node(data["tree"], parts)
         if anchor is None or not is_dir(anchor):
             raise ToolError(f"锚点不是树中目录条目: {dir_path}")
         if not anchor["children"]:
@@ -866,7 +890,7 @@ class TreeTool:
         under_parts: list[str] | None = None
         if under is not None:
             under_parts = split_rel_path(under)
-            anchor = _find_node(data["tree"], under_parts)
+            anchor = find_node(data["tree"], under_parts)
             if anchor is None or not is_dir(anchor):
                 raise ToolError(f"--under 不是树中目录条目: {under}")
         if depth is not None:
@@ -975,21 +999,6 @@ class TreeTool:
             return None
         return {line for line in proc.stdout.splitlines() if line.strip()}
 
-    def _git_exempt(self, tree: dict, path: str) -> bool:
-        """path 的 git-ignore 有效值：就近覆写——沿祖先链（含自身）最近一次显式设置生效，均缺省则不豁免。"""
-        value = False
-        cursor: dict = {"children": tree}
-        for part in split_rel_path(path):
-            if not is_dir(cursor):
-                break  # 中途段是文件条目：无更深的祖先设置可继承（与 _find_node 同防御）
-            child = cursor["children"].get(part)
-            if child is None:
-                break
-            if "git-ignore" in child:
-                value = child["git-ignore"]
-            cursor = child
-        return value
-
     def _is_skill_pycache(self, path: str) -> bool:
         """技能目录内的 __pycache__（契约测试运行产物）：运行时缓存，豁免未收录告警。"""
         try:
@@ -1059,7 +1068,7 @@ class TreeTool:
             pass  # 非 git 环境静默跳过磁盘对照，由 CLI 层提示
         else:
             tracked = self._git_tracked()  # tracked ⊆ git_files；None = git 不可用，豁免条目退化为仅校验磁盘存在
-            exempt = {p for p in file_paths if self._git_exempt(tree, p)}
+            exempt = {p for p in file_paths if effective_git_ignore(tree, p)}
             for missing in sorted(file_paths - git_files - exempt, key=sort_key):
                 disk = self.repo_root.joinpath(*split_rel_path(missing))
                 if disk.is_dir():

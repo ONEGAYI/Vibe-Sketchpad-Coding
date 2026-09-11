@@ -25,6 +25,10 @@ from pathlib import Path
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BUILD = SKILL_ROOT / "frontend" / "build"
 DEFAULT_DEST = SKILL_ROOT / "dist" / "viewer"
+# 前端构建指引（#23 审查 Standards-3）：与 scripts/deploy.py、
+# dist/scripts/viewer.py 的同名常量逐字一致（deploy_test.py 锁定）；
+# 跨包 import 不可行——部署实例只携带 dist 文件。
+BUILD_GUIDE = "cd frontend && npm install && npm run build"
 
 _EXTERNAL_REF = re.compile(r"^(?:[a-z][a-z0-9+.-]*:)?//", re.IGNORECASE)
 _REF_ATTRS = re.compile(r"""(?:src|href)\s*=\s*"([^"]+)""")
@@ -55,10 +59,7 @@ def assemble(build_dir: Path, dest_dir: Path) -> list[str]:
     build_dir, dest_dir = Path(build_dir), Path(dest_dir)
     index = build_dir / "index.html"
     if not index.is_file():
-        raise AssembleError(
-            f"构建产物缺失: {index}\n"
-            "先在现代构建机执行: cd frontend && npm install && npm run build"
-        )
+        raise AssembleError(f"构建产物缺失: {index}\n先在现代构建机执行: {BUILD_GUIDE}")
     check_release(index)
 
     log: list[str] = []
