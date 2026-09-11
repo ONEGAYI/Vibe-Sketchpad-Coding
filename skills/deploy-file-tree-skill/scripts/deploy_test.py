@@ -25,6 +25,7 @@ from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import assemble_viewer  # noqa: E402
 import deploy  # noqa: E402
 from deploy import DIST, DIST_FILES  # noqa: E402
 from deploy import deploy as run_deploy  # noqa: E402
@@ -450,12 +451,13 @@ class AssembleViewerTest(unittest.TestCase):
         return build
 
     def test_assemble_mirrors_build_and_is_idempotent(self):
+        # 直调 assemble() 纯函数：CLI 层对非默认 --dest 的非空目标有防自伤
+        # 防护（见 test_cli_custom_dest_*），幂等/清理是函数级镜像同步契约
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             build = self.make_build(root)
             dest = root / "dist-viewer"
-            r1 = self.assemble(build, dest)
-            self.assertEqual(r1.returncode, 0, r1.stderr)
+            assemble_viewer.assemble(build, dest)
             self.assertTrue((dest / "index.html").is_file())
             self.assertEqual(
                 (dest / "assets" / "app-AbC123.js").read_bytes(),
@@ -463,23 +465,86 @@ class AssembleViewerTest(unittest.TestCase):
             )
             # public 约定产物（build 根非 hash 文件）照常镜像，重组装不丢失
             self.assertTrue((dest / ".gitattributes").is_file())
-            r2 = self.assemble(build, dest)
-            self.assertEqual(r2.returncode, 0, r2.stderr)
-            self.assertIn("无变更", r2.stdout)  # 幂等：第二次无复制
+            log = assemble_viewer.assemble(build, dest)
+            self.assertTrue(  # 幂等：第二次无复制
+                any("无变更" in line for line in log), log
+            )
             self.assertTrue((dest / ".gitattributes").is_file())
 
     def test_assemble_cleans_stale_hash(self):
+        # 直调 assemble() 纯函数（理由同上）：旧 hash 清理是函数级契约
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             build = self.make_build(root)
             dest = root / "dist-viewer"
-            self.assemble(build, dest)
+            assemble_viewer.assemble(build, dest)
             # 重新构建产出新 hash：dest 中旧 hash 残留必须被清理
             build_new = self.make_build(root.parent / f"{root.name}-b2", js_name="app-NeW789.js")
-            result = self.assemble(build_new, dest)
-            self.assertEqual(result.returncode, 0, result.stderr)
+            assemble_viewer.assemble(build_new, dest)
             self.assertFalse((dest / "assets" / "app-AbC123.js").exists())
             self.assertTrue((dest / "assets" / "app-NeW789.js").is_file())
+
+    def test_cli_custom_dest_missing_or_empty_allowed(self):
+        # 非默认 --dest 防自伤（#23 审查 C3）：目标不存在或为空 → 放行组装
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build = self.make_build(root)
+            for dest in (root / "fresh-viewer", root / "empty-viewer"):
+                if dest.name.startswith("empty"):
+                    dest.mkdir()
+                result = self.assemble(build, dest)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue((dest / "index.html").is_file())
+
+    def test_cli_custom_dest_nonempty_refuses(self):
+        # 非默认 --dest 指向非空目录：中止并说明，目录内文件不得被清理
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build = self.make_build(root)
+            dest = root / "danger-zone"
+            dest.mkdir()
+            victim = dest / "重要文件.py"
+            victim.write_text("print('别删我')", encoding="utf-8", newline="\n")
+            result = self.assemble(build, dest)
+            self.assertEqual(result.returncode, 2)
+            combined = result.stderr + result.stdout
+            self.assertIn("非空", combined)
+            self.assertIn("拒绝", combined)
+            self.assertTrue(victim.is_file())  # 防护先于清理：原文件无损
+
+    def test_cli_default_dest_allowed(self):
+        # 默认目标（dist/viewer 语义）不做非空限制：发行目录的常规重组装
+        # 必须放行。把 DEFAULT_DEST 指到沙箱内已非空的发行目录再走 main()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build = self.make_build(root)
+            default_dest = root / "dist" / "viewer"
+            assemble_viewer.assemble(build, default_dest)  # 预置非空发行目录
+            original = assemble_viewer.DEFAULT_DEST
+            assemble_viewer.DEFAULT_DEST = default_dest
+            try:
+                result = assemble_viewer.main(["--build", str(build)])  # 不传 --dest
+                self.assertEqual(result, 0)
+                self.assertTrue((default_dest / "index.html").is_file())
+            finally:
+                assemble_viewer.DEFAULT_DEST = original
+
+    def test_cli_default_dest_via_equivalent_string_allowed(self):
+        # N3（#23 审查第 3 轮）：--dest 用尾分隔符等价写法指向默认目录，
+        # 不得因字符串比较被误判为非默认而拒绝常规重组装
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build = self.make_build(root)
+            default_dest = root / "dist" / "viewer"
+            assemble_viewer.assemble(build, default_dest)  # 预置非空发行目录
+            original = assemble_viewer.DEFAULT_DEST
+            assemble_viewer.DEFAULT_DEST = default_dest
+            try:
+                equivalent = str(default_dest) + os.sep  # 同一目录，字符串不同
+                result = assemble_viewer.main(["--build", str(build), "--dest", equivalent])
+                self.assertEqual(result, 0)
+            finally:
+                assemble_viewer.DEFAULT_DEST = original
 
     def test_assemble_rejects_external_refs(self):
         with tempfile.TemporaryDirectory() as tmp:

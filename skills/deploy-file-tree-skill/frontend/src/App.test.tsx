@@ -148,6 +148,57 @@ beforeEach(() => {
   });
 });
 
+function jsonErr(status: number, message: string): RespLike {
+  return { ok: false, status, json: async () => ({ error: message }) };
+}
+
+function searchPayload(
+  generation: number,
+  kw: string,
+  hitDesc: string,
+  hitPath = "keep.ts",
+): Record<string, unknown> {
+  return {
+    generation,
+    query: { kw, tag: null, under: null, depth: null },
+    total: 1,
+    total_pages: 1,
+    page: 1,
+    page_size: 50,
+    results: [
+      {
+        path: hitPath,
+        kind: "file",
+        desc: hitDesc,
+        detail: [],
+        rel: [],
+        tags: [],
+        collapsed: false,
+        hidden: false,
+        git_ignore: null,
+      },
+    ],
+  };
+}
+
+function detailPayload(generation: number, path: string, desc: string): Record<string, unknown> {
+  return {
+    generation,
+    path,
+    name: path.split("/").pop() ?? "",
+    kind: "file",
+    desc,
+    detail: [],
+    rel: [],
+    backrefs: [],
+    tags: [],
+    collapsed: false,
+    hidden: false,
+    git_ignore: { explicit: null, effective: false },
+    child_count: null,
+  };
+}
+
 // ---- fixture：gen1 旧快照与 gen2 新快照 ----
 
 function dirEntry(path: string, desc: string, childCount: number): ChildEntry {
@@ -337,5 +388,266 @@ describe("世代号混用窗口：旧世代响应按 generation 丢弃", () => {
     // 右栏不得出现旧世代详情内容
     await waitFor(() => expect(screen.getByText("dirX")).toBeDefined());
     expect(screen.queryByText("旧世代详情")).toBeNull();
+  });
+});
+
+// PR #23 审查修复：刷新与并发状态机（A1/A2/A3/B1–B5）。
+// 各用例模拟审查指出的具体时序：在途请求被刷新作废后必须有复位或重拉路径，
+// 世代门必须覆盖初始加载与重建循环，刷新期间的用户新操作不得被静默清除。
+describe("刷新与并发状态机修复（A1/A2/A3/B1–B5）", () => {
+  it("A1：刷新作废在途详情后，成功且选中保留时重拉新世代详情（loading 不卡死）", async () => {
+    render(<App />);
+    await loadInitialGen1();
+
+    // 选中 keep.ts：详情请求在途（不 resolve）
+    fireEvent.click(screen.getByText("keep.ts"));
+    const detailReq1 = await waitForReq("GET", "/api/detail");
+
+    // 手动刷新成功换代（keep.ts 在 gen2 仍存在）
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    const refreshReq = await waitForReq("POST", "/api/refresh");
+    refreshReq.resolve(jsonOk({ ...rootInfoPayload(2, 2), refreshed: true }));
+    const topReq = await waitForReq("GET", "/api/children", (q) => q.get("path") === "");
+    topReq.resolve(jsonOk({ generation: 2, path: "", children: [ROOT_DIRX, ROOT_KEEP] }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "刷新" })).toBeDefined());
+
+    // 选中未变（effect 不重跑）时必须主动重拉详情
+    const detailReq2 = await waitForReq("GET", "/api/detail");
+    // 被作废的旧请求此刻才晚到：内容必须被丢弃
+    detailReq1.resolve(jsonOk(detailPayload(1, "keep.ts", "作废旧详情")));
+    detailReq2.resolve(jsonOk(detailPayload(2, "keep.ts", "刷新后新详情")));
+    await waitFor(() => expect(screen.getByText("刷新后新详情")).toBeDefined());
+    expect(screen.queryByText("作废旧详情")).toBeNull();
+  });
+
+  it("A1：刷新失败时被作废的在途详情重拉（右栏不永久占位）", async () => {
+    render(<App />);
+    await loadInitialGen1();
+
+    fireEvent.click(screen.getByText("keep.ts"));
+    const detailReq1 = await waitForReq("GET", "/api/detail");
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    const refreshReq = await waitForReq("POST", "/api/refresh");
+    refreshReq.resolve(jsonErr(500, "模拟刷新失败"));
+    await waitFor(() => expect(screen.getByText(/刷新失败/)).toBeDefined());
+
+    // 失败路径旧数据仍有效：当前选中详情应重拉（服务端未换代，仍 gen1）
+    const detailReq2 = await waitForReq("GET", "/api/detail");
+    detailReq1.resolve(jsonOk(detailPayload(1, "keep.ts", "作废旧详情")));
+    detailReq2.resolve(jsonOk(detailPayload(1, "keep.ts", "失败后重拉详情")));
+    await waitFor(() => expect(screen.getByText("失败后重拉详情")).toBeDefined());
+    expect(screen.queryByText("作废旧详情")).toBeNull();
+  });
+
+  it("A2：首次搜索在途时刷新完成，searchLoading 必须复位", async () => {
+    render(<App />);
+    await loadInitialGen1();
+
+    // 首次搜索（searchResult 仍 null）在途不 resolve
+    fireEvent.change(screen.getByLabelText("关键词"), { target: { value: "首搜" } });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    await waitForReq("GET", "/api/search");
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    await settleRefreshGen2();
+
+    // 搜索按钮回到常态且可点击（loading 复位；卡死时按钮文案是"搜索中…"）
+    const searchBtn = screen.getByRole("button", { name: "搜索" }) as HTMLButtonElement;
+    expect(searchBtn.disabled).toBe(false);
+  });
+
+  it("A3/B1：初始加载 root 与 children 世代不一致时重取到一致", async () => {
+    render(<App />);
+
+    // 第一轮：root=gen1（旧）、children=gen2（新）——跨标签页刷新夹在两次读之间
+    const rootReq1 = await waitForReq("GET", "/api/root");
+    const childrenReq1 = await waitForReq("GET", "/api/children", (q) => q.get("path") === "");
+    rootReq1.resolve(jsonOk(rootInfoPayload(1, 2)));
+    childrenReq1.resolve(
+      jsonOk({ generation: 2, path: "", children: [ROOT_DIRX, ROOT_KEEP] }),
+    );
+
+    // 必须发起第二轮重取（不得直接混用两个世代）
+    const rootReq2 = await waitForReq("GET", "/api/root");
+    const childrenReq2 = await waitForReq("GET", "/api/children", (q) => q.get("path") === "");
+    rootReq2.resolve(jsonOk(rootInfoPayload(2, 2)));
+    childrenReq2.resolve(
+      jsonOk({ generation: 2, path: "", children: [ROOT_DIRX, ROOT_KEEP] }),
+    );
+
+    await waitFor(() => expect(screen.getByText("dirX")).toBeDefined());
+  });
+
+  it("B2：重建期间他人并发刷新换代（children 世代更新）→ 世代门随之升级，旧世代详情被拦", async () => {
+    render(<App />);
+    await loadInitialGen1();
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    const refreshReq = await waitForReq("POST", "/api/refresh");
+    refreshReq.resolve(jsonOk({ ...rootInfoPayload(2, 2), refreshed: true }));
+    const topReq = await waitForReq("GET", "/api/children", (q) => q.get("path") === "");
+    // 他人并发刷新：refresh 响应 gen2，children 已读到 gen3
+    topReq.resolve(jsonOk({ generation: 3, path: "", children: [ROOT_DIRX, ROOT_KEEP] }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "刷新" })).toBeDefined());
+
+    // gen3 树中选中 keep.ts；晚到的 gen2 详情属旧世代，不得混入展示
+    fireEvent.click(screen.getByText("keep.ts"));
+    const detailReq = await waitForReq("GET", "/api/detail");
+    detailReq.resolve(jsonOk(detailPayload(2, "keep.ts", "旧世代详情")));
+
+    await new Promise((r) => setTimeout(r, 50)); // 等待晚到响应处理完
+    expect(screen.getAllByText("keep.ts").length).toBeGreaterThan(0); // 树仍在
+    expect(screen.queryByText("旧世代详情")).toBeNull();
+  });
+
+  it("B3：刷新期间用户新搜索已显示，刷新结束不得清除", async () => {
+    render(<App />);
+    await loadInitialGen1();
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    const refreshReq = await waitForReq("POST", "/api/refresh"); // 刷新在途，稍后 resolve
+
+    // 刷新期间用户搜索（服务端尚未换代，gen1 即当前数据，正常显示）
+    fireEvent.change(screen.getByLabelText("关键词"), { target: { value: "用户词" } });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    const searchReq = await waitForReq("GET", "/api/search");
+    searchReq.resolve(jsonOk(searchPayload(1, "用户词", "用户搜索命中")));
+    await waitFor(() => expect(screen.getByText("用户搜索命中")).toBeDefined());
+
+    // 刷新完成（成功换代）：用户搜索结果必须保留
+    refreshReq.resolve(jsonOk({ ...rootInfoPayload(2, 2), refreshed: true }));
+    const topReq = await waitForReq("GET", "/api/children", (q) => q.get("path") === "");
+    topReq.resolve(jsonOk({ generation: 2, path: "", children: [ROOT_DIRX, ROOT_KEEP] }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "刷新" })).toBeDefined());
+
+    await new Promise((r) => setTimeout(r, 50)); // 等待可能的延迟清除暴露出来
+    expect(screen.getByText("用户搜索命中")).toBeDefined();
+  });
+
+  it("B4：刷新失败时被作废的展开目录重新拉取（不永久加载）", async () => {
+    render(<App />);
+    await loadInitialGen1();
+
+    // 展开 dirX：子项请求在途（不 resolve）
+    fireEvent.click(screen.getByRole("button", { name: "展开 dirX" }));
+    const childrenReq1 = await waitForReq(
+      "GET",
+      "/api/children",
+      (q) => q.get("path") === "dirX",
+    );
+
+    // 刷新失败：旧数据保留，但 dirX 的在途请求已被 epoch bump 作废
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    const refreshReq = await waitForReq("POST", "/api/refresh");
+    refreshReq.resolve(jsonErr(500, "模拟刷新失败"));
+    await waitFor(() => expect(screen.getByText(/刷新失败/)).toBeDefined());
+
+    // 失败路径必须重发 dirX 子项请求
+    const childrenReq2 = await waitForReq(
+      "GET",
+      "/api/children",
+      (q) => q.get("path") === "dirX",
+    );
+    childrenReq1.resolve(
+      jsonOk({
+        generation: 1,
+        path: "dirX",
+        children: [fileEntry("dirX/old.ts", "作废子项")],
+      }),
+    );
+    childrenReq2.resolve(
+      jsonOk({
+        generation: 1,
+        path: "dirX",
+        children: [fileEntry("dirX/child.ts", "重拉子项")],
+      }),
+    );
+    await waitFor(() =>
+      expect(document.querySelector('[data-path="dirX/child.ts"]')).not.toBeNull(),
+    );
+    // 作废请求的结果不得复活
+    expect(document.querySelector('[data-path="dirX/old.ts"]')).toBeNull();
+  });
+
+  it("B5：同代并发搜索，旧请求晚到不得覆盖新结果", async () => {
+    render(<App />);
+    await loadInitialGen1();
+
+    // 首搜在途（按钮禁用），用户改词后回车再搜（form 提交不受按钮禁用影响）
+    fireEvent.change(screen.getByLabelText("关键词"), { target: { value: "第一次" } });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    const searchReqA = await waitForReq(
+      "GET",
+      "/api/search",
+      (q) => q.get("kw") === "第一次",
+    );
+
+    fireEvent.change(screen.getByLabelText("关键词"), { target: { value: "第二次" } });
+    fireEvent.submit(screen.getByRole("search"));
+    const searchReqB = await waitForReq(
+      "GET",
+      "/api/search",
+      (q) => q.get("kw") === "第二次",
+    );
+
+    // 新请求先返回并显示
+    searchReqB.resolve(jsonOk(searchPayload(1, "第二次", "新搜索命中")));
+    await waitFor(() => expect(screen.getByText("新搜索命中")).toBeDefined());
+
+    // 旧请求晚到：不得覆盖新结果
+    searchReqA.resolve(jsonOk(searchPayload(1, "第一次", "旧搜索命中")));
+    await waitFor(() => expect(screen.getByText("新搜索命中")).toBeDefined());
+    expect(screen.queryByText("旧搜索命中")).toBeNull();
+  });
+});
+
+describe("第 3 轮复核回归（N1/N2）", () => {
+  it("N1：刷新在途期间改选，成功后不得为旧选中重拉（右栏不永久占位）", async () => {
+    render(<App />);
+    await loadInitialGen1();
+
+    // 旧选中 A=keep.ts，详情已显示
+    fireEvent.click(screen.getByText("keep.ts"));
+    const detailA1 = await waitForReq("GET", "/api/detail", (q) => q.get("path") === "keep.ts");
+    detailA1.resolve(jsonOk(detailPayload(1, "keep.ts", "A 的旧详情")));
+    await waitFor(() => expect(screen.getByText("A 的旧详情")).toBeDefined());
+
+    // 刷新在途（POST 挂起）→ 用户改选 B=dirX：B 的详情请求在途（epoch 为刷新后）
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    const refreshReq = await waitForReq("POST", "/api/refresh");
+    fireEvent.click(screen.getByText("dirX"));
+    const detailB = await waitForReq("GET", "/api/detail", (q) => q.get("path") === "dirX");
+
+    // 刷新成功换代（A/B 均存在），重建根级缓存
+    refreshReq.resolve(jsonOk({ ...rootInfoPayload(2, 2), refreshed: true }));
+    const topReq = await waitForReq("GET", "/api/children", (q) => q.get("path") === "");
+    topReq.resolve(jsonOk({ generation: 2, path: "", children: [ROOT_DIRX, ROOT_KEEP] }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "刷新" })).toBeDefined());
+
+    // B 的在途详情到达（新世代）：应显示 B；为旧选中 A 的重拉不得作废它
+    detailB.resolve(jsonOk(detailPayload(2, "dirX", "B 的新详情")));
+    await waitFor(() => expect(screen.getByText("B 的新详情")).toBeDefined());
+    expect(screen.queryByText(/加载中/)).toBeNull();
+  });
+
+  it("N2：详情响应被世代门拦下时按当前世代重拉一次（右栏不永久占位）", async () => {
+    render(<App />);
+    await loadInitialGen1();
+
+    // 先完成一次刷新换代（世代门 known=2，无选中不触发详情重拉）
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    await settleRefreshGen2();
+
+    // 点击 keep.ts：详情请求在换代的极窄窗口被旧快照应答（晚到的 gen1 响应）
+    fireEvent.click(screen.getByText("keep.ts"));
+    const staleReq = await waitForReq("GET", "/api/detail", (q) => q.get("path") === "keep.ts");
+    staleReq.resolve(jsonOk(detailPayload(1, "keep.ts", "过期内容")));
+
+    // 拦下后必须按当前世代重拉并显示
+    const retryReq = await waitForReq("GET", "/api/detail", (q) => q.get("path") === "keep.ts");
+    retryReq.resolve(jsonOk(detailPayload(2, "keep.ts", "新世代详情")));
+    await waitFor(() => expect(screen.getByText("新世代详情")).toBeDefined());
+    expect(screen.queryByText("过期内容")).toBeNull();
   });
 });

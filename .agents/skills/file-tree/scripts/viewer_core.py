@@ -72,10 +72,14 @@ class Snapshot:
             data = json.loads(text)
         except json.JSONDecodeError as exc:
             raise ViewerError(f"快照不是合法 JSON: {exc}", 400) from exc
+        except RecursionError as exc:
+            raise ViewerError("快照嵌套层级过深，无法解析（RecursionError）", 400) from exc
         try:
             normalized = normalize_data(data)
         except ToolError as exc:
             raise ViewerError(f"快照结构校验失败: {exc}", 400) from exc
+        except RecursionError as exc:
+            raise ViewerError("快照嵌套层级过深，无法解析（RecursionError）", 400) from exc
 
         self.source = str(tree_json)
         self.root_name: str = normalized.get("root") or DEFAULT_ROOT_NAME
