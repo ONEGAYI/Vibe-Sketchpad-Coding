@@ -181,7 +181,8 @@ class DeployTest(unittest.TestCase):
         )  # 仅记该业务操作
 
     def test_deploy_redeploy_compact_unchanged(self):
-        # 已是新紧凑规范：重复部署数据与历史字节不变、无迁移日志
+        # 已是新紧凑规范（字节精确）：重复部署数据与历史字节不变、无迁移日志，
+        # 也不得记"保留原排版"提示——文件本已是新规范，措辞须与事实相符
         target = self.make_target()
         run_deploy(target)
         skill = target / ".agents/skills/file-tree"
@@ -194,10 +195,13 @@ class DeployTest(unittest.TestCase):
 
         self.assertEqual((skill / "tree.json").read_bytes(), before)
         self.assertEqual(tool.history_path.read_bytes(), hist_before)
-        self.assertNotIn("规范化迁移", "".join(log))
+        joined = "".join(log)
+        self.assertNotIn("规范化迁移", joined)
+        self.assertNotIn("保留原排版", joined)
 
     def test_deploy_upgrade_keeps_crlf_bytes(self):
-        # CRLF 换行的规范数据：升级同样不重写——部署与 check 共用同一 CRLF 归一口径
+        # CRLF 换行的规范数据：升级同样不重写——部署与 check 共用同一 CRLF 归一口径。
+        # 行尾差异不构成"旧排版"：已是新规范（CRLF 变体），不得记"保留原排版"提示
         target = self.make_target()
         run_deploy(target)
         skill = target / ".agents/skills/file-tree"
@@ -211,7 +215,9 @@ class DeployTest(unittest.TestCase):
 
         log = run_deploy(target)
 
-        self.assertNotIn("规范化迁移", "".join(log))
+        joined = "".join(log)
+        self.assertNotIn("规范化迁移", joined)
+        self.assertNotIn("保留原排版", joined)
         self.assertEqual((skill / "tree.json").read_bytes(), before)
 
     def test_deploy_cleans_stale_files_and_cache(self):

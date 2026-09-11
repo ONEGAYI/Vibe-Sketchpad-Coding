@@ -26,6 +26,7 @@ from tree_tool import (  # noqa: E402
     _cmd_query,
     _cmd_rm_batch,
     _cmd_root,
+    canonical_form,
     default_history_path,
     dumps_canonical,
     dumps_canonical_legacy,
@@ -2389,6 +2390,36 @@ class LegacyCheckCompatTest(SandboxTest):
         )
         self.assertFalse(is_canonical_text("not json"))
         self.assertFalse(is_canonical_text('{"tree":"不是对象"}\n'))  # 结构非法
+
+    def test_canonical_form_returns_specific_form(self):
+        # 判定来源的形态化版本：返回具体形态而非布尔；CRLF 归一口径内聚其中，
+        # 两种规范的 CRLF 变体归入各自形态
+        data = normalize_data(make_data())
+        self.assertEqual(canonical_form(compact_dumps(data)), "compact")
+        self.assertEqual(canonical_form(compact_dumps(data).replace("\n", "\r\n")), "compact")
+        self.assertEqual(canonical_form(legacy_dumps(data)), "legacy")
+        self.assertEqual(canonical_form(legacy_dumps(data).replace("\n", "\r\n")), "legacy")
+        # 非规范排版（缩进/缺末尾 LF）与解析失败/结构非法 → None
+        self.assertIsNone(canonical_form(json.dumps(data, ensure_ascii=False, indent=4) + "\n"))
+        self.assertIsNone(canonical_form(compact_dumps(data).rstrip("\n")))
+        self.assertIsNone(canonical_form("not json"))
+        self.assertIsNone(canonical_form('{"tree":"不是对象"}\n'))
+
+    def test_is_canonical_text_thin_wrapper_of_canonical_form(self):
+        # is_canonical_text 是 canonical_form 的薄封装：两口径逐样本一致
+        data = normalize_data(make_data())
+        for text in (
+            compact_dumps(data),
+            legacy_dumps(data),
+            compact_dumps(data).replace("\n", "\r\n"),
+            legacy_dumps(data).replace("\n", "\r\n"),
+            json.dumps(data, ensure_ascii=False, indent=4) + "\n",
+            compact_dumps(data).rstrip("\n"),
+            "not json",
+        ):
+            with self.subTest(text=text[:40]):
+                self.assertEqual(is_canonical_text(text), canonical_form(text) is not None)
+
 
     def test_check_rejects_disallowed_layouts(self):
         # 其余排版一律拒绝：对象相等不放行任意缩进/键序/空字段（规格 F06）

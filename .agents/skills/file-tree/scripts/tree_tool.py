@@ -210,20 +210,29 @@ def dumps_canonical_legacy(data: dict) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
 
 
-def is_canonical_text(text: str) -> bool:
-    """判定 text 是否为脚本规范的两种序列化形态之一（新紧凑 / 旧两空格缩进）。
+def canonical_form(text: str) -> str | None:
+    """返回 text 的规范序列化形态："compact"（新紧凑）/ "legacy"（旧两空格缩进）/ None（非规范）。
 
-    内部先做 CRLF 归一（与 check 同口径），再把归一文本与其"解析并规范化后的
-    两种规范输出"做序列化文本级比较——键序、缩进、空字段等排版偏差都会判否，
-    只比较 JSON 对象相等不足以通过；解析失败或结构非法同样判否。
-    check 与部署器升级路径共用本判定，避免双格式接受标准漂移。
+    CRLF 归一内聚于此（与 check 同口径）：先把行尾归一为 LF，再解析并规范化，
+    与两种规范输出做序列化文本级比较——键序、缩进、空字段等排版偏差都判否，
+    只比较 JSON 对象相等不足以通过；解析失败或结构非法同样判 None。
+    check 与部署器升级路径共用本判定（is_canonical_text 为其薄封装），
+    避免双格式接受标准漂移。
     """
     normalized = text.replace("\r\n", "\n")
     try:
         data = normalize_data(json.loads(normalized))
     except (json.JSONDecodeError, ToolError):
-        return False
-    return normalized in (dumps_canonical(data), dumps_canonical_legacy(data))
+        return None
+    for form, out in (("compact", dumps_canonical(data)), ("legacy", dumps_canonical_legacy(data))):
+        if normalized == out:
+            return form
+    return None
+
+
+def is_canonical_text(text: str) -> bool:
+    """判定 text 是否为脚本规范的两种序列化形态之一（新紧凑 / 旧两空格缩进）。"""
+    return canonical_form(text) is not None
 
 
 def replace_block(text: str, begin: str, end: str, content: str) -> str:
