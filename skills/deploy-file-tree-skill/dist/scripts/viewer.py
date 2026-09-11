@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from viewer_core import Snapshot, ViewerError  # noqa: E402
+from viewer_core import DEFAULT_PAGE_SIZE, Snapshot, ViewerError  # noqa: E402
 
 SKILL_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STATIC_DIR = SKILL_ROOT / "frontend" / "build"  # Vite 构建产物（被忽略，不入库）
@@ -82,6 +82,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 self._api_children(parse_qs(parsed.query))
             elif parsed.path == "/api/detail":
                 self._api_detail(parse_qs(parsed.query))
+            elif parsed.path == "/api/search":
+                self._api_search(parse_qs(parsed.query))
             elif parsed.path.startswith("/api/"):
                 self._send_json(404, {"error": f"未知接口: {parsed.path}"})
             else:
@@ -114,6 +116,37 @@ class ViewerHandler(BaseHTTPRequestHandler):
         if not path:
             raise ViewerError("缺少 path 参数", 400)
         self._send_json(200, self.server.snapshot.detail(path))
+
+    def _api_search(self, query: dict):
+        """组合搜索（G08）：kw / tag / under / depth / page / page_size 全部可选。
+
+        数值参数非法（非整数、越界）报 400 可读错误；kw/tag/under 空串视为未提供。
+        """
+        def first(name: str) -> str | None:
+            value = (query.get(name) or [""])[0].strip()
+            return value or None
+
+        def positive_int(name: str, default: int | None = None) -> int | None:
+            raw = first(name)
+            if raw is None:
+                return default
+            try:
+                return int(raw)
+            except ValueError:
+                raise ViewerError(f"{name} 必须是整数: {raw!r}", 400) from None
+
+        kw = first("kw")
+        tag = first("tag")
+        under = first("under")
+        depth = positive_int("depth")
+        page = positive_int("page", default=1)
+        page_size = positive_int("page_size", default=DEFAULT_PAGE_SIZE)
+        self._send_json(
+            200,
+            self.server.snapshot.search(
+                kw=kw, tag=tag, under=under, depth=depth, page=page, page_size=page_size
+            ),
+        )
 
     # ------------------------------------------------------------------
     # 静态资源：仅托管查看器前端构建目录（G20），拒绝目录穿越

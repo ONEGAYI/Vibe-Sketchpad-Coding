@@ -27,7 +27,10 @@ export interface EntryDetail {
   desc: string;
   /** 完整描述：每元素一行 */
   detail: string[];
+  /** 正向关联：当前条目 → 目标 */
   rel: RelRef[];
+  /** 反向关联：引用者 → 当前条目（来源必在树中，exists 恒 true） */
+  backrefs: RelRef[];
   tags: string[];
   collapsed: boolean;
   hidden: boolean;
@@ -38,6 +41,36 @@ export interface EntryDetail {
     effective: boolean;
   };
   child_count: number | null;
+}
+
+/** 搜索筛选条件（服务端回显形态：空条件为 null） */
+export interface SearchQueryEcho {
+  kw: string | null;
+  tag: string | null;
+  under: string | null;
+  depth: number | null;
+}
+
+/** 搜索结果条目：字段集与后端 /api/search 契约一致 */
+export interface SearchHit {
+  path: string;
+  kind: "dir" | "file";
+  desc: string;
+  detail: string[];
+  rel: string[];
+  tags: string[];
+  collapsed: boolean;
+  hidden: boolean;
+  git_ignore: boolean | null;
+}
+
+export interface SearchResponse {
+  query: SearchQueryEcho;
+  total: number;
+  total_pages: number;
+  page: number;
+  page_size: number;
+  results: SearchHit[];
 }
 
 export interface RootInfo {

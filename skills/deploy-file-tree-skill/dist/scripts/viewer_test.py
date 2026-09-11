@@ -25,6 +25,7 @@ from urllib.parse import quote
 sys.path.insert(0, str(Path(__file__).parent))
 
 import viewer  # noqa: E402
+from tree_tool import TreeTool  # noqa: E402
 from viewer_core import Snapshot, ViewerError  # noqa: E402
 
 VIEWER_ENTRY = Path(__file__).parent / "viewer.py"
@@ -361,11 +362,15 @@ class HttpServerBase(unittest.TestCase):
     """共享夹具：临时目录快照（无源码/.git/AGENTS.md）+ 随机端口真服务。"""
 
     @classmethod
-    def start_server(cls, static_dir: Path):
+    def start_server(cls, static_dir: Path, data: dict | None = None):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.dir = Path(cls.tmp.name)
         cls.snapshot_path = cls.dir / "tree.json"
-        cls.snapshot_path.write_text(compact_dumps(make_snapshot_data()), encoding="utf-8", newline="\n")
+        cls.snapshot_path.write_text(
+            compact_dumps(data if data is not None else make_snapshot_data()),
+            encoding="utf-8",
+            newline="\n",
+        )
         cls.before_bytes = cls.snapshot_path.read_bytes()
         cls.before_digest = hashlib.sha256(cls.before_bytes).hexdigest()
         cls.static_dir = static_dir
@@ -686,7 +691,640 @@ class ViewerCliTest(unittest.TestCase):
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+        reader.join(timeout=2)
+        if proc.stdout:
+            proc.stdout.close()  # 显式关闭管道，避免 GC 期 ResourceWarning
         self.assertEqual(sha256_file(self.snapshot_path), before)
+
+
+# ---------------------------------------------------------------------------
+# 搜索与关联（#19）：组合筛选 / 分页 / 反向关联 / 与核心 query 语义对照
+# ---------------------------------------------------------------------------
+
+
+def make_search_data() -> dict:
+    """搜索专用固定样本：相似目录前缀（src vs src2）、中文、casefold 陷阱、
+    detail 多行 join 语义、跨目录关联、悬空 rel、git-ignore 三态、hidden 命中。
+
+    全树 walk 序（sort_key casefold + 码点决胜，DFS 先自身后子级）共 13 条：
+    docs, docs/guide.md, docs/README.md, hidden-note.md, src, src/core.ts,
+    src/sub, src/sub/deep.ts, src/util.ts, src2, src2/clone.ts,
+    中文目录, 中文目录/说明.md
+    """
+    return {
+        "root": "搜索样本",
+        "tags": {"doc": "说明文档", "script": "维护脚本", "pure": "纯逻辑"},
+        "tree": {
+            "docs": {
+                "kind": "dir",
+                "desc": "文档目录",
+                "children": {
+                    "guide.md": {
+                        "kind": "file",
+                        "desc": "使用指南",
+                        "detail": ["六步学习", "闭环练习"],
+                        "tags": ["doc"],
+                    },
+                    "README.md": {
+                        "kind": "file",
+                        "desc": "项目自述文件 readme",
+                        "rel": ["gone/deep.rs", "src/core.ts"],
+                        "tags": ["doc"],
+                    },
+                },
+            },
+            "hidden-note.md": {
+                "kind": "file",
+                "desc": "隐藏的说明 readme",
+                "hidden": True,
+                "tags": ["doc"],
+            },
+            "src": {
+                "kind": "dir",
+                "desc": "源码目录",
+                "children": {
+                    "core.ts": {
+                        "kind": "file",
+                        "desc": "核心渲染逻辑 Render",
+                        "rel": ["docs/README.md"],
+                        "tags": ["script", "pure"],
+                    },
+                    "sub": {
+                        "kind": "dir",
+                        "desc": "子模块",
+                        "children": {
+                            "deep.ts": {"kind": "file", "desc": "深层模块", "tags": ["pure"]},
+                        },
+                    },
+                    "util.ts": {
+                        "kind": "file",
+                        "desc": "工具函数 readme 提取",
+                        "rel": ["src/core.ts"],
+                        "tags": ["script"],
+                        "git-ignore": False,
+                    },
+                },
+            },
+            "src2": {
+                "kind": "dir",
+                "desc": "相似前缀目录（不应混入 src 子树）",
+                "git-ignore": True,
+                "children": {
+                    "clone.ts": {"kind": "file", "desc": "相似前缀文件"},
+                },
+            },
+            "中文目录": {
+                "kind": "dir",
+                "desc": "中文命名目录",
+                "children": {
+                    "说明.md": {
+                        "kind": "file",
+                        "desc": "中文渲染说明",
+                        "detail": ["中文 detail 行"],
+                    },
+                },
+            },
+        },
+    }
+
+
+# 固定期望（独立手写，不由被测实现生成）
+SEARCH_WALK_ORDER = [
+    "docs",
+    "docs/guide.md",
+    "docs/README.md",
+    "hidden-note.md",
+    "src",
+    "src/core.ts",
+    "src/sub",
+    "src/sub/deep.ts",
+    "src/util.ts",
+    "src2",
+    "src2/clone.ts",
+    "中文目录",
+    "中文目录/说明.md",
+]
+SRC_SUBTREE = [
+    "src",
+    "src/core.ts",
+    "src/sub",
+    "src/sub/deep.ts",
+    "src/util.ts",
+]
+README_HITS = ["docs/README.md", "hidden-note.md", "src/util.ts"]
+DOC_TAG_HITS = ["docs/guide.md", "docs/README.md", "hidden-note.md"]
+PURE_TAG_HITS = ["src/core.ts", "src/sub/deep.ts"]
+
+
+class SearchFixture(unittest.TestCase):
+    """共享夹具：搜索样本的一次性内存 Snapshot。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.snapshot_path = Path(cls.tmp.name) / "tree.json"
+        cls.snapshot_path.write_text(
+            compact_dumps(make_search_data()), encoding="utf-8", newline="\n"
+        )
+        cls.snap = Snapshot(cls.snapshot_path)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    @staticmethod
+    def paths(result: dict) -> list[str]:
+        return [hit["path"] for hit in result["results"]]
+
+
+class SearchKeywordTest(SearchFixture):
+    """G08 关键词语义：casefold 子串，覆盖 path/desc/detail（与 query :884 对齐）。"""
+
+    def test_kw_matches_across_path_desc_and_detail(self):
+        # path 命中 README.md；desc 命中 hidden-note.md 与 util.ts；guide.md 不含
+        result = self.snap.search(kw="readme")
+        self.assertEqual(self.paths(result), README_HITS)
+        self.assertEqual(result["total"], 3)
+
+    def test_kw_casefold_input_case_insensitive(self):
+        # 大小写不敏感：输入 "README" 与 "readme" 同集；kw="render" 命中 desc 含 "Render"
+        self.assertEqual(self.paths(self.snap.search(kw="README")), README_HITS)
+        self.assertEqual(
+            self.paths(self.snap.search(kw="RENDER")), ["src/core.ts"]
+        )
+
+    def test_kw_chinese(self):
+        self.assertEqual(
+            self.paths(self.snap.search(kw="渲染")),
+            ["src/core.ts", "中文目录/说明.md"],
+        )
+
+    def test_kw_detail_join_semantics(self):
+        # detail 多行以空格 join（照抄核心 haystack 构造）：带空格短语命中、无空格不命中
+        self.assertEqual(self.paths(self.snap.search(kw="学习 闭环")), ["docs/guide.md"])
+        result = self.snap.search(kw="学习闭环")
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["results"], [])
+
+    def test_kw_no_match_reports_empty_state(self):
+        result = self.snap.search(kw="不存在的关键词")
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["total_pages"], 0)
+        self.assertEqual(result["results"], [])
+
+    def test_hidden_entry_still_matched(self):
+        # G11：hidden 条目照常命中（界面可见性由前端处理，搜索不过滤）
+        self.assertIn("hidden-note.md", self.paths(self.snap.search(kw="readme")))
+
+
+class SearchTagSubtreeTest(SearchFixture):
+    """G08 标签与子树筛选：精确成员匹配；段级前缀（src 不纳 src2）；锚点含入。"""
+
+    def test_tag_exact_membership(self):
+        self.assertEqual(self.paths(self.snap.search(tag="doc")), DOC_TAG_HITS)
+        self.assertEqual(self.paths(self.snap.search(tag="pure")), PURE_TAG_HITS)
+
+    def test_tag_without_entries_is_empty(self):
+        result = self.snap.search(tag="nosuch")
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["results"], [])
+
+    def test_under_includes_anchor_and_excludes_similar_prefix(self):
+        # 核心防混淆点：段级比较，src2 不混入 src；锚点自身含入（相对深度 0）
+        result = self.snap.search(under="src")
+        self.assertEqual(self.paths(result), SRC_SUBTREE)
+        all_paths = self.paths(result)
+        self.assertNotIn("src2", all_paths)
+        self.assertNotIn("src2/clone.ts", all_paths)
+
+    def test_under_chinese_dir(self):
+        self.assertEqual(
+            self.paths(self.snap.search(under="中文目录")),
+            ["中文目录", "中文目录/说明.md"],
+        )
+
+    def test_under_depth_limits_relative_levels(self):
+        # depth=1：锚点 + 直接子级（deep.ts 相对深度 2 排除）；depth=2：全子树
+        self.assertEqual(
+            self.paths(self.snap.search(under="src", depth=1)),
+            ["src", "src/core.ts", "src/sub", "src/util.ts"],
+        )
+        self.assertEqual(self.paths(self.snap.search(under="src", depth=2)), SRC_SUBTREE)
+
+    def test_combined_filters_are_conjunction(self):
+        # 组合 = AND（与核心 query 一致）
+        self.assertEqual(
+            self.paths(self.snap.search(kw="readme", tag="doc")),
+            ["docs/README.md", "hidden-note.md"],
+        )
+        self.assertEqual(
+            self.paths(self.snap.search(tag="pure", under="src")), PURE_TAG_HITS
+        )
+        self.assertEqual(
+            self.paths(self.snap.search(kw="渲染", tag="pure", under="src")),
+            ["src/core.ts"],
+        )
+        # 组合后无命中：交集为空
+        result = self.snap.search(kw="readme", tag="pure")
+        self.assertEqual(result["total"], 0)
+
+    def test_no_filters_returns_all_in_walk_order(self):
+        result = self.snap.search()
+        self.assertEqual(self.paths(result), SEARCH_WALK_ORDER)
+        self.assertEqual(result["total"], 13)
+
+    def test_result_entry_field_set(self):
+        # 结果条目字段与 tree_tool query --json 同口径；git-ignore 三态不混为一态
+        hit = next(h for h in self.snap.search(under="src")["results"] if h["path"] == "src/util.ts")
+        self.assertEqual(
+            sorted(hit.keys()),
+            ["collapsed", "desc", "detail", "git_ignore", "hidden", "kind", "path", "rel", "tags"],
+        )
+        self.assertEqual(hit["kind"], "file")
+        self.assertEqual(hit["desc"], "工具函数 readme 提取")
+        self.assertEqual(hit["rel"], ["src/core.ts"])
+        self.assertIs(hit["git_ignore"], False)  # 显式退出豁免
+        anchor = self.snap.search(under="src")["results"][0]
+        self.assertIsNone(anchor["git_ignore"])  # 键缺省 = 继承
+
+    def test_search_order_stable_across_calls(self):
+        first = self.paths(self.snap.search(kw="readme"))
+        second = self.paths(self.snap.search(kw="readme"))
+        self.assertEqual(first, second)
+
+
+class SearchPaginationTest(SearchFixture):
+    """G08 分页：page/page_size（1 起），对确定性序列切片，不漏不重。"""
+
+    def test_first_page_with_total(self):
+        result = self.snap.search(page=1, page_size=5)
+        self.assertEqual(result["total"], 13)
+        self.assertEqual(result["total_pages"], 3)
+        self.assertEqual(result["page"], 1)
+        self.assertEqual(result["page_size"], 5)
+        self.assertEqual(self.paths(result), SEARCH_WALK_ORDER[:5])
+
+    def test_last_page_is_short(self):
+        self.assertEqual(
+            self.paths(self.snap.search(page=3, page_size=5)), SEARCH_WALK_ORDER[10:]
+        )
+
+    def test_all_pages_concatenate_exactly(self):
+        # 不漏不重：翻全部页拼接 == 全量，无重复
+        collected = []
+        for page in (1, 2, 3):
+            collected.extend(self.paths(self.snap.search(page=page, page_size=5)))
+        self.assertEqual(collected, SEARCH_WALK_ORDER)
+        self.assertEqual(len(collected), len(set(collected)))
+
+    def test_page_beyond_last_is_empty_with_total_intact(self):
+        result = self.snap.search(page=4, page_size=5)
+        self.assertEqual(result["results"], [])
+        self.assertEqual(result["total"], 13)
+        self.assertEqual(result["total_pages"], 3)
+
+    def test_default_page_size_covers_sample(self):
+        result = self.snap.search()
+        self.assertEqual(result["page"], 1)
+        self.assertEqual(result["page_size"], 50)
+        self.assertEqual(result["total_pages"], 1)
+        self.assertEqual(len(result["results"]), 13)
+
+    def test_small_result_set_pagination(self):
+        # 3 条命中按 page_size=2 → 两页（2 + 1）
+        first = self.snap.search(kw="readme", page=1, page_size=2)
+        second = self.snap.search(kw="readme", page=2, page_size=2)
+        self.assertEqual(first["total"], 3)
+        self.assertEqual(first["total_pages"], 2)
+        self.assertEqual(self.paths(first), README_HITS[:2])
+        self.assertEqual(self.paths(second), README_HITS[2:])
+
+    def test_max_page_size_accepted(self):
+        result = self.snap.search(page_size=200)
+        self.assertEqual(len(result["results"]), 13)
+
+
+class SearchErrorTest(SearchFixture):
+    """非法参数报可读错误：与核心 ToolError 校验对齐（400/404）。"""
+
+    def assert_viewer_error(self, *args, status: int, fragment: str, **kwargs):
+        with self.assertRaises(ViewerError) as ctx:
+            self.snap.search(*args, **kwargs)
+        self.assertEqual(ctx.exception.status, status, str(ctx.exception))
+        self.assertIn(fragment, str(ctx.exception))
+
+    def test_invalid_page(self):
+        for page in (0, -1):
+            with self.subTest(page=page):
+                self.assert_viewer_error(page=page, status=400, fragment="page")
+
+    def test_invalid_page_size(self):
+        for size in (0, -5, 201):
+            with self.subTest(page_size=size):
+                self.assert_viewer_error(page_size=size, status=400, fragment="page_size")
+
+    def test_under_not_found_is_404(self):
+        self.assert_viewer_error(under="nope", status=404, fragment="不是树中目录")
+
+    def test_under_file_anchor_is_400(self):
+        self.assert_viewer_error(under="src/core.ts", status=400, fragment="不是目录")
+
+    def test_under_illegal_path_is_400(self):
+        self.assert_viewer_error(under="../escape", status=400, fragment="'..'")
+
+    def test_depth_requires_under(self):
+        self.assert_viewer_error(depth=1, status=400, fragment="under")
+
+    def test_depth_must_be_positive_int(self):
+        self.assert_viewer_error(under="src", depth=0, status=400, fragment="正整数")
+        self.assert_viewer_error(under="src", depth=-1, status=400, fragment="正整数")
+        self.assert_viewer_error(under="src", depth=1.5, status=400, fragment="正整数")
+
+
+class BackrefDetailTest(SearchFixture):
+    """G09 双向关联：detail 返回正向 rel（保持 #18 契约）与派生 backrefs。"""
+
+    def test_backrefs_list_sources_in_walk_order(self):
+        d = self.snap.detail("src/core.ts")
+        # 引用者 = docs/README.md 与 src/util.ts，walk 序，全部真实存在
+        self.assertEqual(
+            d["backrefs"],
+            [
+                {"path": "docs/README.md", "exists": True},
+                {"path": "src/util.ts", "exists": True},
+            ],
+        )
+
+    def test_backrefs_of_readme(self):
+        d = self.snap.detail("docs/README.md")
+        self.assertEqual(d["backrefs"], [{"path": "src/core.ts", "exists": True}])
+
+    def test_backrefs_empty_when_unreferenced(self):
+        for path in ("src/util.ts", "hidden-note.md", "src2/clone.ts"):
+            with self.subTest(path=path):
+                self.assertEqual(self.snap.detail(path)["backrefs"], [])
+
+    def test_forward_rel_contract_unchanged_with_dangling_flag(self):
+        # #18 已建立的正向 rel 契约保持：悬空目标 exists=False，不致命
+        d = self.snap.detail("docs/README.md")
+        self.assertEqual(
+            d["rel"],
+            [{"path": "gone/deep.rs", "exists": False}, {"path": "src/core.ts", "exists": True}],
+        )
+
+    def test_direction_semantics_distinct(self):
+        # 方向实证：util.ts 引用 core.ts（反向含之），但 core.ts 不引用 util.ts（正向无之）
+        d = self.snap.detail("src/core.ts")
+        self.assertEqual([r["path"] for r in d["rel"]], ["docs/README.md"])
+        self.assertIn("src/util.ts", [b["path"] for b in d["backrefs"]])
+
+    def test_dangling_target_detail_is_404_not_crash(self):
+        # 悬空目标不在快照：详情 404（前端据 exists 标记不发起跳转，后端兜底不崩溃）
+        with self.assertRaises(ViewerError) as ctx:
+            self.snap.detail("gone/deep.rs")
+        self.assertEqual(ctx.exception.status, 404)
+
+
+class QueryParityTest(unittest.TestCase):
+    """与核心 TreeTool.query 的语义对照：同快照、同参数，路径序列必须一致。
+
+    独立于被测实现：TreeTool 实例只调用 query（内部仅 load() 只读快照），
+    不触发任何写入口。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.snapshot_path = Path(cls.tmp.name) / "tree.json"
+        cls.snapshot_path.write_text(
+            compact_dumps(make_search_data()), encoding="utf-8", newline="\n"
+        )
+        cls.snap = Snapshot(cls.snapshot_path)
+        cls.tool = TreeTool(
+            tree_json=cls.snapshot_path,
+            agents_md=cls.snapshot_path.parent / "AGENTS.md",
+            repo_root=cls.snapshot_path.parent,
+            root_name="parity",
+            history_path=cls.snapshot_path.parent / "history.json",
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def core_paths(self, **kwargs) -> list[str]:
+        return [path for path, _ in self.tool.query(**kwargs)]
+
+    def viewer_paths(self, **kwargs) -> list[str]:
+        return [h["path"] for h in self.snap.search(**kwargs)["results"]]
+
+    def test_parity_all_entries_walk_order(self):
+        self.assertEqual(self.core_paths(), SEARCH_WALK_ORDER)
+        self.assertEqual(self.viewer_paths(), SEARCH_WALK_ORDER)
+
+    def test_parity_keyword_dimensions(self):
+        for kw in ("readme", "README", "RENDER", "渲染", "学习 闭环", "学习闭环", "不存在的关键词"):
+            with self.subTest(kw=kw):
+                self.assertEqual(self.core_paths(kw=kw), self.viewer_paths(kw=kw))
+
+    def test_parity_tag(self):
+        for tag in ("doc", "script", "pure", "nosuch"):
+            with self.subTest(tag=tag):
+                self.assertEqual(self.core_paths(tag=tag), self.viewer_paths(tag=tag))
+
+    def test_parity_under_and_depth(self):
+        cases = [
+            {"under": "src"},
+            {"under": "src", "depth": 1},
+            {"under": "src", "depth": 2},
+            {"under": "src2"},
+            {"under": "中文目录"},
+        ]
+        for kwargs in cases:
+            with self.subTest(**kwargs):
+                self.assertEqual(self.core_paths(**kwargs), self.viewer_paths(**kwargs))
+                self.assertEqual(self.core_paths(**kwargs), self.viewer_paths(**kwargs, page=1, page_size=200))
+
+    def test_parity_combined_filters(self):
+        cases = [
+            {"kw": "readme", "tag": "doc"},
+            {"tag": "pure", "under": "src"},
+            {"kw": "渲染", "tag": "pure", "under": "src", "depth": 1},
+            {"kw": "readme", "tag": "pure"},
+        ]
+        for kwargs in cases:
+            with self.subTest(**kwargs):
+                self.assertEqual(self.core_paths(**kwargs), self.viewer_paths(**kwargs))
+
+    def test_parity_rel_of_equals_backrefs(self):
+        # 反向关联派生等价性：query(rel_of=path) 全树扫描 == 内存反向索引
+        for path in ("src/core.ts", "docs/README.md", "src/util.ts", "src2/clone.ts"):
+            with self.subTest(path=path):
+                expected = self.core_paths(rel_of=path)
+                self.assertEqual(
+                    [b["path"] for b in self.snap.detail(path)["backrefs"]], expected
+                )
+
+    def test_parity_under_error_contract(self):
+        # 错误口径对照：核心 ToolError / 查看器 ViewerError，消息要点一致
+        with self.assertRaises(Exception):
+            self.tool.query(under="nope")
+        with self.assertRaises(ViewerError) as ctx:
+            self.snap.search(under="nope")
+        self.assertEqual(ctx.exception.status, 404)
+        with self.assertRaises(Exception):
+            self.tool.query(under="src", depth=0)
+        with self.assertRaises(ViewerError):
+            self.snap.search(under="src", depth=0)
+
+    def test_parity_full_field_set_against_core_json(self):
+        # 结果条目与核心 _cmd_query --json 字段同口径抽查（kind/desc/tags/git-ignore 三态）
+        core = dict((p, n) for p, n in self.tool.query())
+        hits = {h["path"]: h for h in self.snap.search(page_size=200)["results"]}
+        self.assertEqual(set(hits), set(core))
+        node = core["src2"]
+        self.assertEqual(hits["src2"]["kind"], "dir")
+        self.assertEqual(hits["src2"]["desc"], node.get("desc", ""))
+        self.assertEqual(hits["src2"]["tags"], node.get("tags", []))
+        self.assertIs(hits["src2"]["git_ignore"], node.get("git-ignore"))  # True 显式豁免
+        node_util = core["src/util.ts"]
+        self.assertIs(hits["src/util.ts"]["git_ignore"], node_util.get("git-ignore"))
+
+
+class SearchMemoryHoldingTest(unittest.TestCase):
+    """G13 内存持有：构造后删除快照文件，搜索与关联查询仍完整可用。"""
+
+    def test_search_and_backrefs_work_after_file_deleted(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "tree.json"
+        path.write_text(compact_dumps(make_search_data()), encoding="utf-8", newline="\n")
+        snap = Snapshot(path)
+        path.unlink()  # 物理删除：此后任何请求若重新解析文件都会失败
+        result = snap.search(kw="readme")
+        self.assertEqual(result["total"], 3)
+        d = snap.detail("src/core.ts")
+        self.assertEqual([b["path"] for b in d["backrefs"]], ["docs/README.md", "src/util.ts"])
+
+
+class SearchHttpApiTest(HttpServerBase):
+    """真 HTTP：/api/search 完整响应、分页、组合筛选、错误与行为链。"""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile as _tf
+
+        cls._extra = _tf.TemporaryDirectory()
+        cls.start_server(static_dir=Path(cls._extra.name), data=make_search_data())
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.stop_server()
+        after = cls.snapshot_path.read_bytes()
+        assert hashlib.sha256(after).hexdigest() == cls.before_digest, "搜索流量改变了快照字节"
+        assert sorted(p.name for p in cls.dir.iterdir()) == ["tree.json"], "快照目录出现新增文件"
+        cls._extra.cleanup()
+        cls.tmp.cleanup()
+
+    def test_api_search_response_shape(self):
+        status, payload = self.get_json(f"/api/search?kw={self.q('readme')}")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["total"], 3)
+        self.assertEqual(payload["total_pages"], 1)
+        self.assertEqual(payload["page"], 1)
+        self.assertEqual(payload["page_size"], 50)
+        self.assertEqual(
+            payload["query"], {"kw": "readme", "tag": None, "under": None, "depth": None}
+        )
+        self.assertEqual([h["path"] for h in payload["results"]], README_HITS)
+        hit = payload["results"][0]
+        self.assertEqual(
+            sorted(hit.keys()),
+            ["collapsed", "desc", "detail", "git_ignore", "hidden", "kind", "path", "rel", "tags"],
+        )
+
+    def test_api_search_pagination_flow(self):
+        # 13 条、page_size=5：三页翻完，末页 3 条
+        collected = []
+        for page in (1, 2, 3, 4):
+            status, payload = self.get_json(f"/api/search?page={page}&page_size=5")
+            self.assertEqual(status, 200)
+            collected.extend(h["path"] for h in payload["results"])
+            if page == 4:
+                self.assertEqual(payload["results"], [])
+                self.assertEqual(payload["total"], 13)
+        self.assertEqual(collected, SEARCH_WALK_ORDER)
+
+    def test_api_search_combined_filters_urlencoded(self):
+        # 中文 kw 与中文 under 经 URL 编码往返；组合 AND
+        url = f"/api/search?kw={self.q('渲染')}&tag=pure&under={self.q('src')}"
+        status, payload = self.get_json(url)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["query"], {"kw": "渲染", "tag": "pure", "under": "src", "depth": None})
+        self.assertEqual([h["path"] for h in payload["results"]], ["src/core.ts"])
+
+    def test_api_search_empty_result_state(self):
+        status, payload = self.get_json(f"/api/search?kw={self.q('不存在的关键词')}")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["total"], 0)
+        self.assertEqual(payload["total_pages"], 0)
+        self.assertEqual(payload["results"], [])
+
+    def test_api_search_subtree_excludes_similar_prefix(self):
+        status, payload = self.get_json(f"/api/search?under={self.q('src')}&page_size=200")
+        self.assertEqual(status, 200)
+        paths = [h["path"] for h in payload["results"]]
+        self.assertEqual(paths, SRC_SUBTREE)
+        self.assertNotIn("src2", paths)
+
+    def test_api_search_error_contract(self):
+        cases = [
+            ("page=0", 400, "page"),
+            ("page_size=201", 400, "page_size"),
+            (f"under={self.q('nope')}", 404, "不是树中目录"),
+            ("depth=1", 400, "under"),
+            (f"under=src&depth=abc", 400, "depth"),
+        ]
+        for query, status, fragment in cases:
+            with self.subTest(query=query):
+                code, payload = self.get_json(f"/api/search?{query}")
+                self.assertEqual(code, status)
+                self.assertIn(fragment, payload["error"])
+
+    def test_api_search_then_detail_then_relation_chain(self):
+        # 行为链（模拟前端完整操作）：搜索 → 点命中 → 详情关联分区 → 沿反向关联跳转 → 悬空不崩
+        _, search = self.get_json(f"/api/search?kw={self.q('readme')}")
+        self.assertEqual([h["path"] for h in search["results"]], README_HITS)
+
+        status, detail = self.get_json(f"/api/detail?path={self.q('src/util.ts')}")
+        self.assertEqual(status, 200)
+        self.assertEqual([r["path"] for r in detail["rel"]], ["src/core.ts"])
+
+        status, core = self.get_json(f"/api/detail?path={self.q('src/core.ts')}")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [b["path"] for b in core["backrefs"]], ["docs/README.md", "src/util.ts"]
+        )
+
+        status, readme = self.get_json(f"/api/detail?path={self.q('docs/README.md')}")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            readme["rel"],
+            [
+                {"path": "gone/deep.rs", "exists": False},
+                {"path": "src/core.ts", "exists": True},
+            ],
+        )
+        # 悬空目标：详情 404（不崩溃），前端凭 exists=False 不跳转
+        status, payload = self.get_json(f"/api/detail?path={self.q('gone/deep.rs')}")
+        self.assertEqual(status, 404)
+        self.assertIn("error", payload)
+
+    def test_api_detail_response_includes_backrefs_field(self):
+        status, payload = self.get_json(f"/api/detail?path={self.q('src/core.ts')}")
+        self.assertEqual(status, 200)
+        self.assertIn("backrefs", payload)
+        self.assertEqual(payload["backrefs"][0], {"path": "docs/README.md", "exists": True})
 
 
 if __name__ == "__main__":
