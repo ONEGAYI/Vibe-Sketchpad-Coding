@@ -1,21 +1,28 @@
 """deploy-file-tree-skill：把 file-tree 技能部署到任意仓库。
 
-dist/ 是 file-tree 技能的发行版快照——公用四件套
-（SKILL.md / agents/openai.yaml / scripts/tree_tool.py / scripts/tree_tool_test.py），
-不含任何仓库数据。部署 = 复制四件套到目标仓库 .agents/skills/file-tree/，
-首跑初始化空 tree.json（新紧凑规范格式）并渲染 AGENTS.md 标记块，随后自动
-check 自检；目标已有技能时是升级模式：镜像同步——以 dist 为准覆盖，清理
-dist 中不存在的旧版本残留与 __pycache__，仅 tree.json 与本机撤销历史
-（.history.json）永不动。tree.json 的升级判定与 check 同源（canonical_form，
-一次判定返回具体形态）：新旧两种规范排版（紧凑 / 两空格缩进）均为有效数据，
-部署不重写任何字节——旧排版留待下次正常写入时自动转换为新紧凑格式，已是
-新规范（含 CRLF 变体）无需提示；仅当结构不规范（如缺派生 kind 字段）才做
-规范化结构迁移（数据语义不变），且迁移经统一写入口直接输出新紧凑规范，
-保证数据无损且废弃文件升级到位。
+dist/ 是 file-tree 技能的发行版快照——公用核心四件套
+（SKILL.md / agents/openai.yaml / scripts/tree_tool.py / scripts/tree_tool_test.py）、
+GUI 查看器五件（viewer.py / viewer_core.py / viewer_test.py /
+gen_viewer_sample.py / bench_viewer.py）与受控发行静态资源 dist/viewer/
+（index.html + assets/，前端构建组装入库，G18），不含任何仓库数据。
+部署 = 镜像复制上述清单到目标仓库 .agents/skills/file-tree/（viewer 静态
+资源按 dist 实际内容动态清点，旧 hash 资源随升级清理不残留），首跑初始化
+空 tree.json（新紧凑规范格式）并渲染 AGENTS.md 标记块，随后自动 check 自检；
+目标已有技能时是升级模式：镜像同步——以 dist 为准覆盖，清理 dist 中不存在
+的旧版本残留与 __pycache__，仅 tree.json 与本机撤销历史（.history.json）
+永不动。tree.json 的升级判定与 check 同源（canonical_form，一次判定返回
+具体形态）：新旧两种规范排版（紧凑 / 两空格缩进）均为有效数据，部署不
+重写任何字节——旧排版留待下次正常写入时自动转换为新紧凑格式（GUI 资源
+随技能安装同样不提前转换，工单 #15 延迟转换语义），已是新规范（含 CRLF
+变体）无需提示；仅当结构不规范（如缺派生 kind 字段）才做规范化结构迁移
+（数据语义不变），且迁移经统一写入口直接输出新紧凑规范，保证数据无损且
+废弃文件升级到位。
 
 开发主线在主仓库（Vibe-Sketchpad-Coding）的 skills/deploy-file-tree-skill/dist/：
-直接改 dist、验证后逐仓库 deploy，并同步本机使用副本。update-dist 仅作应急
-回收：从指定仓库的部署实例提取四件套刷新 dist。
+直接改 dist、验证后逐仓库 deploy，并同步本机使用副本。前端发行快照由
+scripts/assemble_viewer.py 组装（npm run build 自动串联）。update-dist 仅作
+应急回收：从指定仓库的部署实例提取固定清单刷新 dist（不动 dist/viewer/
+等主线维护内容）。
 
 用法：
   python deploy.py deploy <目标仓库路径> [--skill-dir .agents/skills/file-tree]
@@ -31,12 +38,23 @@ from pathlib import Path
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 DIST = SKILL_ROOT / "dist"
+# 前端构建指引（#23 审查 Standards-3）：与 dist/scripts/viewer.py、
+# scripts/assemble_viewer.py 的同名常量逐字一致（deploy_test.py 锁定）；
+# 跨包 import 不可行——部署实例只携带 dist 文件。
+BUILD_GUIDE = "cd frontend && npm install && npm run build"
 DIST_FILES = (
     "SKILL.md",
     "agents/openai.yaml",
     "scripts/tree_tool.py",
     "scripts/tree_tool_test.py",
+    "scripts/viewer.py",
+    "scripts/viewer_core.py",
+    "scripts/viewer_test.py",
+    "scripts/gen_viewer_sample.py",
+    "scripts/bench_viewer.py",
 )
+# dist 内受控发行静态资源目录（G18）：index.html + assets/（hash 文件名）
+VIEWER_STATIC_REL = "viewer"
 
 
 class DeployError(Exception):
@@ -55,13 +73,28 @@ def load_tree_tool():
     return tree_tool
 
 
+def dist_manifest(dist_root: Path) -> list[str]:
+    """发行文件清单 = 固定清单 + dist/viewer/ 静态资源（hash 文件名动态清点）。"""
+    manifest = list(DIST_FILES)
+    static_root = Path(dist_root) / VIEWER_STATIC_REL
+    if static_root.is_dir():
+        manifest.extend(
+            p.relative_to(dist_root).as_posix()
+            for p in sorted(static_root.rglob("*"))
+            if p.is_file()
+        )
+    return manifest
+
+
 def _mirror_sync(dist_root: Path, skill_dir: Path, log: list[str]) -> None:
     """dist → skill_dir 镜像同步：覆盖 dist 文件；清理 dist 中不存在的旧残留与缓存。
 
-    保护清单之外（tree.json / .history.json）一切以 dist 为准，废弃文件的升级能真正到位。
+    保护清单之外（tree.json / .history.json）一切以 dist 为准，废弃文件的升级能
+    真正到位——viewer 静态资源在清单内不被误删，旧 hash 资源不在清单内被清理。
     """
-    dist_rel = {Path(rel).as_posix() for rel in DIST_FILES}
-    for rel in DIST_FILES:
+    manifest = dist_manifest(dist_root)
+    dist_rel = {Path(rel).as_posix() for rel in manifest}
+    for rel in manifest:
         src, dest = dist_root / rel, skill_dir / rel
         if dest.is_file() and dest.read_bytes() == src.read_bytes():
             continue
@@ -106,6 +139,11 @@ def deploy(
 
     skill_dir = target_root / skill_rel
     log: list[str] = []
+    if not (dist_root / VIEWER_STATIC_REL / "index.html").is_file():
+        log.append(
+            "提示: dist/viewer/ 发行静态资源缺失，本次部署不含 GUI 页面"
+            f"（组装方法: {BUILD_GUIDE}）"
+        )
     _mirror_sync(dist_root, skill_dir, log)
 
     ft = load_tree_tool()
