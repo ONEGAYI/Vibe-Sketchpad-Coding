@@ -1,4 +1,4 @@
-/** 与后端 viewer.py API 响应对应的类型契约。 */
+/** 与后端 viewer.py API 响应对应的类型契约（所有响应均带 generation 世代号）。 */
 
 export interface ChildEntry {
   name: string;
@@ -79,4 +79,19 @@ export interface RootInfo {
   tags: Record<string, string>;
   counts: { dirs: number; files: number; total: number };
   source: string;
+}
+
+/** POST /api/refresh 成功响应：新世代号 + 根信息。 */
+export interface RefreshResponse {
+  generation: number;
+  refreshed: true;
+  root: string;
+  tags: Record<string, string>;
+  counts: { dirs: number; files: number; total: number };
+  source: string;
+}
+
+/** 世代号戳：后端给每个查询响应的统一盖章（G12 版本隔离）。 */
+export interface GenerationStamped {
+  generation: number;
 }

@@ -1327,5 +1327,257 @@ class SearchHttpApiTest(HttpServerBase):
         self.assertEqual(payload["backrefs"][0], {"path": "docs/README.md", "exists": True})
 
 
+# ---------------------------------------------------------------------------
+# 快照刷新与世代号（G12）：原子替换、失败保留旧快照、版本不混用
+# ---------------------------------------------------------------------------
+
+
+class RefreshHttpTestBase(HttpServerBase):
+    """刷新夹具：服务启动后可改写同一路径的快照文件再触发 POST /api/refresh。
+
+    模拟真实使用：用户在查看器运行期间用外部工具替换 tree.json，再点刷新。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile as _tf
+
+        cls._extra = _tf.TemporaryDirectory()
+        cls.start_server(static_dir=Path(cls._extra.name))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.stop_server()
+        cls._extra.cleanup()
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        # 每个用例前把快照文件重置回固定样本并刷新：用例改写的是磁盘文件，
+        # 不重置会泄漏给后续用例（世代号断言已全部改为相对值，不受影响）
+        self.snapshot_path.write_text(
+            compact_dumps(make_snapshot_data()), encoding="utf-8", newline="\n"
+        )
+        status, _ = self.refresh()
+        self.assertEqual(status, 200)
+
+    def rewrite_snapshot(self, data: dict):
+        """替换同一路径的快照内容（外部改写，不经查看器）。"""
+        self.snapshot_path.write_text(
+            compact_dumps(data), encoding="utf-8", newline="\n"
+        )
+
+    def request_json(self, method: str, path: str):
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        try:
+            conn.request(method, path)
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+        finally:
+            conn.close()
+
+    def refresh(self):
+        return self.request_json("POST", "/api/refresh")
+
+    def current_generation(self) -> int:
+        """读当前世代号（不改变状态）；测试断言一律用相对变化，不依赖执行顺序。"""
+        status, payload = self.get_json("/api/root")
+        self.assertEqual(status, 200)
+        return payload["generation"]
+
+
+class ViewerRefreshApiTest(RefreshHttpTestBase):
+    def test_generation_starts_at_one_and_stamped_on_all_apis(self):
+        # 世代号防混淆（G12）：目录/搜索/详情/根信息响应统一盖章，
+        # 前端据此识别"这是哪个快照版本的回答"
+        for path in (
+            "/api/root",
+            "/api/children",
+            "/api/search",
+            f"/api/detail?path={self.q('apps')}",
+        ):
+            with self.subTest(api=path):
+                status, payload = self.get_json(path)
+                self.assertEqual(status, 200)
+                self.assertIn("generation", payload)
+                self.assertIsInstance(payload["generation"], int)
+        # 同一时刻所有接口盖章一致（同一快照版本）
+        gens = set()
+        for path in (
+            "/api/root",
+            "/api/children",
+            "/api/search",
+            f"/api/detail?path={self.q('apps')}",
+        ):
+            _, payload = self.get_json(path)
+            gens.add(payload["generation"])
+        self.assertEqual(len(gens), 1)
+
+    def test_refresh_reloads_same_path_and_bumps_generation(self):
+        data = make_snapshot_data()
+        data["tree"]["新增目录"] = {"kind": "dir", "desc": "刷新后新增", "children": {}}
+        self.rewrite_snapshot(data)
+        before_digest = hashlib.sha256(self.snapshot_path.read_bytes()).hexdigest()
+        gen_before = self.current_generation()
+
+        status, payload = self.refresh()
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["refreshed"])
+        self.assertEqual(payload["generation"], gen_before + 1)
+        self.assertEqual(payload["root"], "演示仓库")
+        self.assertEqual(payload["counts"], {"dirs": 7, "files": 8, "total": 15})
+        gen_after = payload["generation"]
+
+        # 刷新后目录/搜索/详情都来自新快照，且世代号一致（不混用旧响应）
+        status, children = self.get_json("/api/children")
+        self.assertEqual(status, 200)
+        self.assertEqual(children["generation"], gen_after)
+        self.assertIn("新增目录", [c["path"] for c in children["children"]])
+
+        status, search = self.get_json(f"/api/search?kw={self.q('刷新后新增')}")
+        self.assertEqual(status, 200)
+        self.assertEqual(search["generation"], gen_after)
+        self.assertEqual([h["path"] for h in search["results"]], ["新增目录"])
+
+        status, detail = self.get_json(f"/api/detail?path={self.q('新增目录')}")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["generation"], gen_after)
+        self.assertEqual(detail["desc"], "刷新后新增")
+
+        # 只读（G04）：刷新只是重读，不写回、不产生伴生文件
+        self.assertEqual(
+            hashlib.sha256(self.snapshot_path.read_bytes()).hexdigest(), before_digest
+        )
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["tree.json"])
+
+    def test_refresh_with_unchanged_file_still_bumps_generation(self):
+        # 文件未变时刷新：内容相同但世代号必须递增（强制前端丢弃旧缓存重建）
+        gen_before = self.current_generation()
+        status, first = self.refresh()
+        self.assertEqual(status, 200)
+        self.assertEqual(first["generation"], gen_before + 1)
+        status, second = self.refresh()
+        self.assertEqual(status, 200)
+        self.assertEqual(second["generation"], gen_before + 2)
+        status, payload = self.get_json("/api/root")
+        self.assertEqual(payload["generation"], gen_before + 2)
+        self.assertEqual(payload["counts"], COUNTS)
+
+    def test_refresh_invalid_json_fails_and_keeps_old_snapshot(self):
+        gen_before = self.current_generation()
+        self.snapshot_path.write_text("{oops 不是 json", encoding="utf-8", newline="\n")
+        status, payload = self.refresh()
+        self.assertEqual(status, 400)
+        self.assertIn("JSON", payload["error"])
+        self.assertFalse(payload["refreshed"])
+        # 失败响应带旧世代号：前端据此确认"仍是旧数据，未刷新"
+        self.assertEqual(payload["generation"], gen_before)
+
+        # 旧数据保持可用且世代号不变（未发生半更新）
+        status, children = self.get_json("/api/children")
+        self.assertEqual(status, 200)
+        self.assertEqual(children["generation"], gen_before)
+        self.assertEqual([c["path"] for c in children["children"]], ROOT_ORDER)
+
+    def test_refresh_bad_structure_fails_and_keeps_old_snapshot(self):
+        gen_before = self.current_generation()
+        self.rewrite_snapshot({"tree": {"a": {"desc": 1}}})
+        status, payload = self.refresh()
+        self.assertEqual(status, 400)
+        self.assertIn("结构校验失败", payload["error"])
+        self.assertFalse(payload["refreshed"])
+        self.assertEqual(payload["generation"], gen_before)
+
+        status, detail = self.get_json(f"/api/detail?path={self.q('apps/main.tsx')}")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["generation"], gen_before)
+        self.assertEqual(detail["name"], "main.tsx")
+
+    def test_refresh_missing_file_fails_and_keeps_old_snapshot(self):
+        gen_before = self.current_generation()
+        self.snapshot_path.unlink()
+        status, payload = self.refresh()
+        self.assertEqual(status, 500)
+        self.assertFalse(payload["refreshed"])
+        self.assertIn("无法读取", payload["error"])
+        self.assertEqual(payload["generation"], gen_before)
+
+        # 恢复文件后旧数据仍可用，再次刷新可成功
+        self.rewrite_snapshot(make_snapshot_data())
+        status, children = self.get_json("/api/children")
+        self.assertEqual(status, 200)
+        status, payload = self.refresh()
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["generation"], gen_before + 1)
+
+    def test_deleted_path_returns_404_after_refresh(self):
+        # 前端回退规则的依据：刷新后已删除路径的详情/子项查询明确 404
+        data = make_snapshot_data()
+        del data["tree"]["apps"]["children"]["main.tsx"]
+        self.rewrite_snapshot(data)
+        status, _ = self.refresh()
+        self.assertEqual(status, 200)
+
+        status, payload = self.get_json(f"/api/detail?path={self.q('apps/main.tsx')}")
+        self.assertEqual(status, 404)
+        # 已删除路径的子项查询同样明确 404（条目不存在）
+        status, payload = self.get_json(f"/api/children?path={self.q('apps/main.tsx')}")
+        self.assertEqual(status, 404)
+
+    def test_post_other_endpoints_still_405(self):
+        for path in ("/api/children", "/api/root", "/api/search", "/api/detail"):
+            with self.subTest(path=path):
+                status, payload = self.request_json("POST", path)
+                self.assertEqual(status, 405)
+                self.assertIn("只读", payload["error"])
+
+    def test_concurrent_queries_never_mix_generations(self):
+        # 原子替换（G12"同一快照版本"）：查询线程与成功刷新并发，
+        # 每个响应的内容与世代号必须配对——旧集合配旧世代、新集合配新世代
+        gen_before = self.current_generation()
+        stop = threading.Event()
+        mismatches: list[str] = []
+        observations: set[tuple[int, bool]] = set()
+
+        def poll_children():
+            while not stop.is_set():
+                status, payload = self.get_json("/api/children")
+                if status != 200:
+                    mismatches.append(f"查询失败 {status}: {payload}")
+                    return
+                has_new = any(c["path"] == "新增目录" for c in payload["children"])
+                gen = payload["generation"]
+                observations.add((gen, has_new))
+                # 配对校验：旧世代必无新增目录；新世代必有（新快照写死包含它）
+                if (gen == gen_before and has_new) or (
+                    gen == gen_before + 1 and not has_new
+                ):
+                    mismatches.append(f"版本混用: generation={gen} has_new={has_new}")
+                elif gen not in (gen_before, gen_before + 1):
+                    mismatches.append(f"意外世代: {gen}")
+
+        data = make_snapshot_data()
+        data["tree"]["新增目录"] = {"kind": "dir", "desc": "刷新后新增", "children": {}}
+
+        worker = threading.Thread(target=poll_children, daemon=True)
+        worker.start()
+        try:
+            time.sleep(0.05)
+            self.rewrite_snapshot(data)
+            status, payload = self.refresh()
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["generation"], gen_before + 1)
+            time.sleep(0.15)
+        finally:
+            stop.set()
+            worker.join(timeout=5)
+
+        self.assertEqual(mismatches, [])
+        # 两种版本都被观察到（并发窗口真实存在），且无第三种世代出现
+        self.assertEqual({gen for gen, _ in observations}, {gen_before, gen_before + 1})
+        # 终态：全部响应落在刷新后世代
+        status, payload = self.get_json("/api/children")
+        self.assertEqual(payload["generation"], gen_before + 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,6 @@
 import type { SearchHit, SearchResponse } from "../types";
 import { canNext, canPrev } from "../searchUtils";
+import { VirtualList } from "./VirtualList";
 
 interface SearchResultsProps {
   resp: SearchResponse;
@@ -9,7 +10,10 @@ interface SearchResultsProps {
   loading: boolean;
 }
 
-/** 左栏搜索结果：总命中数、分页（不漏不重由后端切片保证）、空状态、命中定位。 */
+/**
+ * 左栏搜索结果：总命中数、分页（不漏不重由后端切片保证）、空状态、命中定位。
+ * 列表主体走虚拟化（G14）：一页最多 200 命中也只挂视口附近行。
+ */
 export function SearchResults({
   resp,
   onPageChange,
@@ -39,21 +43,24 @@ export function SearchResults({
       {empty ? (
         <p className="muted search-empty">没有匹配的条目：换一组关键词或放宽筛选条件试试。</p>
       ) : (
-        <ul className="hit-list" role="listbox" aria-label="搜索结果">
-          {resp.results.map((hit) => (
-            <li key={hit.path}>
+        <VirtualList
+          count={resp.results.length}
+          className="hits-viewport"
+          estimateSize={44}
+          overscan={8}
+          viewportProps={{ role: "listbox", "aria-label": "搜索结果" }}
+          renderItem={(index) => {
+            const hit = resp.results[index];
+            return (
               <button
                 type="button"
-                className={[
-                  "hit-row",
-                  hit.kind,
-                  hit.hidden ? "is-hidden" : "",
-                ]
+                className={["hit-row", hit.kind, hit.hidden ? "is-hidden" : ""]
                   .filter(Boolean)
                   .join(" ")}
                 role="option"
                 aria-selected={false}
                 title={hit.path}
+                data-hit-row
                 onClick={() => onHitClick(hit)}
               >
                 <span className="icon" aria-hidden="true">
@@ -72,9 +79,9 @@ export function SearchResults({
                   {hit.hidden && <span className="badge badge-hidden">hidden</span>}
                 </span>
               </button>
-            </li>
-          ))}
-        </ul>
+            );
+          }}
+        />
       )}
 
       {pages > 1 && (
