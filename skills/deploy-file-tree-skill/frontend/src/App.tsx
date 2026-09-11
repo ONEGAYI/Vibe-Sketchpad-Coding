@@ -95,9 +95,10 @@ export default function App() {
 
   /** 拉取条目详情（A1 抽取为可复用：选中 effect 与刷新成功后的重拉共用）。
    * seq 防同代乱序，epoch 防跨版本旧响应，generation 防新 epoch 携旧快照
-   * 内容的混用窗口。 */
+   * 内容的混用窗口。旧世代响应被世代门拦下时按当前世代重拉一次（N2：
+   * 否则 detail 停留 null、右栏永久占位），仅重拉一次防循环。 */
   const loadDetail = useCallback(
-    (path: string) => {
+    (path: string, retriedStale = false): Promise<void> => {
       const seq = ++detailSeq.current;
       const epoch = epochGuard.current();
       setDetail(null);
@@ -105,12 +106,12 @@ export default function App() {
       return api
         .detail(path)
         .then((d) => {
-          if (
-            seq === detailSeq.current &&
-            epochGuard.isCurrent(epoch) &&
-            !generationGate.isStale(d.generation)
-          )
-            setDetail(d);
+          if (seq !== detailSeq.current || !epochGuard.isCurrent(epoch)) return;
+          if (generationGate.isStale(d.generation)) {
+            if (!retriedStale) void loadDetail(path, true);
+            return;
+          }
+          setDetail(d);
         })
         .catch((err) => {
           if (seq === detailSeq.current && epochGuard.isCurrent(epoch)) {
@@ -121,6 +122,8 @@ export default function App() {
           if (seq === detailSeq.current) setDetailLoading(false);
         });
     },
+    // 自引用（重拉）依赖 deps 稳定的 useCallback 实例
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [epochGuard, generationGate],
   );
 
@@ -363,6 +366,8 @@ export default function App() {
       setRootInfo(resp);
 
       // 选中回退：仍存在→重拉详情（新世代数据，selected 未变 effect 不重跑）；
+      // 刷新在途期间用户已改选时不得为旧选中重拉（N1：会作废用户在途详情
+      // 并写入旧详情，右栏永久占位）——改选由其自身的详情 effect 负责；
       // 被删→回退目标入历史（selected 变化驱动 effect 重拉）；全删→清历史与详情
       if (outcome.selected === null) {
         setHistory(emptyHistory());
@@ -370,7 +375,7 @@ export default function App() {
         setDetailLoading(false);
       } else if (outcome.originalSelectedDeleted) {
         setHistory((h) => pushSelection(h, outcome.selected!));
-      } else {
+      } else if (selectedRef.current === outcome.selected) {
         loadDetail(outcome.selected);
       }
       if (outcome.notice) setNotice(outcome.notice);

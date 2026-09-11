@@ -529,6 +529,23 @@ class AssembleViewerTest(unittest.TestCase):
             finally:
                 assemble_viewer.DEFAULT_DEST = original
 
+    def test_cli_default_dest_via_equivalent_string_allowed(self):
+        # N3（#23 审查第 3 轮）：--dest 用尾分隔符等价写法指向默认目录，
+        # 不得因字符串比较被误判为非默认而拒绝常规重组装
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build = self.make_build(root)
+            default_dest = root / "dist" / "viewer"
+            assemble_viewer.assemble(build, default_dest)  # 预置非空发行目录
+            original = assemble_viewer.DEFAULT_DEST
+            assemble_viewer.DEFAULT_DEST = default_dest
+            try:
+                equivalent = str(default_dest) + os.sep  # 同一目录，字符串不同
+                result = assemble_viewer.main(["--build", str(build), "--dest", equivalent])
+                self.assertEqual(result, 0)
+            finally:
+                assemble_viewer.DEFAULT_DEST = original
+
     def test_assemble_rejects_external_refs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

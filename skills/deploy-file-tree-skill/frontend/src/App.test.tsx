@@ -601,3 +601,53 @@ describe("刷新与并发状态机修复（A1/A2/A3/B1–B5）", () => {
     expect(screen.queryByText("旧搜索命中")).toBeNull();
   });
 });
+
+describe("第 3 轮复核回归（N1/N2）", () => {
+  it("N1：刷新在途期间改选，成功后不得为旧选中重拉（右栏不永久占位）", async () => {
+    render(<App />);
+    await loadInitialGen1();
+
+    // 旧选中 A=keep.ts，详情已显示
+    fireEvent.click(screen.getByText("keep.ts"));
+    const detailA1 = await waitForReq("GET", "/api/detail", (q) => q.get("path") === "keep.ts");
+    detailA1.resolve(jsonOk(detailPayload(1, "keep.ts", "A 的旧详情")));
+    await waitFor(() => expect(screen.getByText("A 的旧详情")).toBeDefined());
+
+    // 刷新在途（POST 挂起）→ 用户改选 B=dirX：B 的详情请求在途（epoch 为刷新后）
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    const refreshReq = await waitForReq("POST", "/api/refresh");
+    fireEvent.click(screen.getByText("dirX"));
+    const detailB = await waitForReq("GET", "/api/detail", (q) => q.get("path") === "dirX");
+
+    // 刷新成功换代（A/B 均存在），重建根级缓存
+    refreshReq.resolve(jsonOk({ ...rootInfoPayload(2, 2), refreshed: true }));
+    const topReq = await waitForReq("GET", "/api/children", (q) => q.get("path") === "");
+    topReq.resolve(jsonOk({ generation: 2, path: "", children: [ROOT_DIRX, ROOT_KEEP] }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "刷新" })).toBeDefined());
+
+    // B 的在途详情到达（新世代）：应显示 B；为旧选中 A 的重拉不得作废它
+    detailB.resolve(jsonOk(detailPayload(2, "dirX", "B 的新详情")));
+    await waitFor(() => expect(screen.getByText("B 的新详情")).toBeDefined());
+    expect(screen.queryByText(/加载中/)).toBeNull();
+  });
+
+  it("N2：详情响应被世代门拦下时按当前世代重拉一次（右栏不永久占位）", async () => {
+    render(<App />);
+    await loadInitialGen1();
+
+    // 先完成一次刷新换代（世代门 known=2，无选中不触发详情重拉）
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    await settleRefreshGen2();
+
+    // 点击 keep.ts：详情请求在换代的极窄窗口被旧快照应答（晚到的 gen1 响应）
+    fireEvent.click(screen.getByText("keep.ts"));
+    const staleReq = await waitForReq("GET", "/api/detail", (q) => q.get("path") === "keep.ts");
+    staleReq.resolve(jsonOk(detailPayload(1, "keep.ts", "过期内容")));
+
+    // 拦下后必须按当前世代重拉并显示
+    const retryReq = await waitForReq("GET", "/api/detail", (q) => q.get("path") === "keep.ts");
+    retryReq.resolve(jsonOk(detailPayload(2, "keep.ts", "新世代详情")));
+    await waitFor(() => expect(screen.getByText("新世代详情")).toBeDefined());
+    expect(screen.queryByText("过期内容")).toBeNull();
+  });
+});

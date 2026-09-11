@@ -101,8 +101,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     # #23 审查 C3 自伤防护：清理逻辑会删除 dest 下构建产物之外的文件，
     # --dest 误指技能根等非空目录会连带删除脚本。非默认目标要求为空或
-    # 不存在；默认 dist/viewer 不受限（受控发行快照本就非空、需幂等重组装）
-    if args.dest != str(DEFAULT_DEST):
+    # 不存在；默认 dist/viewer 不受限（受控发行快照本就非空、需幂等重组装）。
+    # 比较用 resolve 后的路径（N3）：尾分隔符/相对写法指向默认目录时放行
+    if Path(args.dest).resolve() != DEFAULT_DEST.resolve():
         dest = Path(args.dest)
         if dest.is_dir() and any(dest.iterdir()):
             print(
