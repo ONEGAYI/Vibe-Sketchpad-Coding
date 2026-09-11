@@ -40,9 +40,9 @@ class DeployTest(unittest.TestCase):
         for rel in DIST_FILES:
             self.assertTrue((skill / rel).is_file(), rel)
             self.assertEqual((skill / rel).read_bytes(), (DIST / rel).read_bytes())
-        # 空数据为脚本规范形态
+        # 空数据为脚本规范形态（紧凑单行 JSON + 末尾 LF；空 tags 词表被规范化剔除）
         self.assertEqual(
-            (skill / "tree.json").read_text(encoding="utf-8"), '{\n  "tree": {}\n}\n'
+            (skill / "tree.json").read_text(encoding="utf-8"), '{"tree":{}}\n'
         )
         # AGENTS.md 生成骨架并含两标记块
         agents = (target / "AGENTS.md").read_text(encoding="utf-8")
