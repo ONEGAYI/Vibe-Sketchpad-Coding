@@ -6,9 +6,9 @@
 
 ## 用途
 
-- **deploy**：把 file-tree 技能装进目标仓库（默认 `.agents/skills/file-tree/`）。首次部署复制四件套、初始化空 `tree.json`、渲染 AGENTS.md 标记块；已有技能时为升级模式——以 dist 为准镜像同步，清理旧残留文件与 `__pycache__`
+- **deploy**：把 file-tree 技能装进目标仓库（默认 `.agents/skills/file-tree/`）。首次部署复制四件套、初始化空 `tree.json`（新紧凑规范格式）、渲染 AGENTS.md 标记块；已有技能时为升级模式——以 dist 为准镜像同步，清理旧残留文件与 `__pycache__`
 - **update-dist**：应急回收——从任意仓库的部署实例提取四件套刷新 dist（散落改动未主线化时用，常规迭代不走此命令）
-- 数据与历史保护：目标仓库的 `tree.json` 与撤销历史永不覆盖、永不清理；部署后自检失败则整体报错，不留半成品
+- 数据与历史保护：目标仓库的 `tree.json` 与撤销历史永不覆盖、永不清理；`tree.json` 为规范旧排版（两空格缩进）时升级保留原字节不改写，下次正常写入自动转换为新紧凑格式，仅结构不规范（如缺派生 `kind`）才做规范化迁移；部署后自检失败则整体报错，不留半成品
 
 ## 用法
 
@@ -30,4 +30,4 @@ python skills/deploy-file-tree-skill/scripts/deploy.py update-dist <源仓库> [
 ## 技术栈
 
 - Python 3 标准库，无第三方依赖
-- unittest 契约测试（10 用例，沙箱目标仓库模式）
+- unittest 契约测试（15 用例，沙箱目标仓库模式）
