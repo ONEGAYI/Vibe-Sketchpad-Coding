@@ -6,6 +6,7 @@
 import type { ChildEntry } from "../types";
 import type { TreeRow as TreeRowModel } from "../treeRows";
 import { badgeTitle, entryFlags } from "../format";
+import { EntryIcon } from "./EntryIcon";
 
 interface TreeRowViewProps {
   row: TreeRowModel;
@@ -72,6 +73,7 @@ function TreeRowEntry({
       aria-expanded={isDir ? isOpen : undefined}
       aria-level={depth + 1}
       data-tree-row
+      title={`${entry.path}${entry.desc ? ` — ${entry.desc}` : ""}`}
       data-path={entry.path}
       data-selected={selected === entry.path ? "true" : undefined}
       onClick={() => onRowClick(entry.path)}
@@ -93,9 +95,7 @@ function TreeRowEntry({
           ·
         </span>
       )}
-      <span className={`icon ${entry.kind}`} aria-hidden="true">
-        {isDir ? (isOpen ? "📂" : "📁") : "📄"}
-      </span>
+      <EntryIcon kind={entry.kind} />
       <span className="name">{entry.name}</span>
       {entry.desc && <span className="desc">{entry.desc}</span>}
       {flags.map((flag) => (

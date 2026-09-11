@@ -1,6 +1,7 @@
 import type { SearchHit, SearchResponse } from "../types";
 import { canNext, canPrev } from "../searchUtils";
 import { VirtualList } from "./VirtualList";
+import { EntryIcon } from "./EntryIcon";
 
 interface SearchResultsProps {
   resp: SearchResponse;
@@ -63,9 +64,7 @@ export function SearchResults({
                 data-hit-row
                 onClick={() => onHitClick(hit)}
               >
-                <span className="icon" aria-hidden="true">
-                  {hit.kind === "dir" ? "📁" : "📄"}
-                </span>
+                <EntryIcon kind={hit.kind} />
                 <span className="hit-main">
                   <span className="hit-path">{hit.path}</span>
                   {hit.desc && <span className="hit-desc">{hit.desc}</span>}

@@ -6,6 +6,7 @@ import { SearchBar } from "./components/SearchBar";
 import { SearchResults } from "./components/SearchResults";
 import { Breadcrumb } from "./components/Breadcrumb";
 import { HelpPanel } from "./components/HelpPanel";
+import { SplitLayout } from "./components/SplitLayout";
 import "./index.css";
 
 const ROOT_PLACEHOLDER = "文件树查看器";
@@ -56,12 +57,8 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <span className="title">{rootInfo ? rootInfo.root : ROOT_PLACEHOLDER}</span>
-        {rootInfo && (
-          <span className="muted">
-            {rootInfo.counts.total} 条目（{rootInfo.counts.dirs} 目录 / {rootInfo.counts.files}{" "}
-            文件）· 只读
-          </span>
-        )}
+        <SearchBar tagVocab={rootInfo?.tags ?? {}} onSearch={onSearch} loading={searchLoading}
+          appliedFilters={searchResult?.query} />
         <span className="toolbar">
           <button
             type="button"
@@ -103,12 +100,6 @@ export default function App() {
 
       <Breadcrumb rootName={rootInfo ? rootInfo.root : ROOT_PLACEHOLDER} selected={selected} onNavigate={navigateTo} />
 
-      <SearchBar
-        tagVocab={rootInfo?.tags ?? {}}
-        onSearch={onSearch}
-        loading={searchLoading}
-      />
-
       {error && (
         <div className="error-bar" role="alert">
           <span>{error}</span>
@@ -126,8 +117,9 @@ export default function App() {
         </div>
       )}
 
-      <main className="columns">
+      <SplitLayout>
         <nav className="panel tree" aria-label="目录树">
+          <div className="nav-heading">文件导航<span className="muted">只读快照</span></div>
           {leftView === "search" && searchResult !== null ? (
             <SearchResults
               resp={searchResult}
@@ -159,8 +151,12 @@ export default function App() {
           loading={detailLoading}
           onNavigate={navigateTo}
         />
-      </main>
+      </SplitLayout>
 
+      <footer className="snapshot-status">
+        <span>{rootInfo ? `${rootInfo.counts.total} 条目 · ${rootInfo.counts.dirs} 目录 · ${rootInfo.counts.files} 文件` : "正在读取快照"}</span>
+        <span>选择条目阅读职责与关联</span>
+      </footer>
       <HelpPanel open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
   );

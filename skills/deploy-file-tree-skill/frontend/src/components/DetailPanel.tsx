@@ -1,4 +1,5 @@
 import type { EntryDetail, RelRef, RootInfo } from "../types";
+import { EntryIcon } from "./EntryIcon";
 import { gitIgnoreLabel } from "../format";
 
 interface DetailPanelProps {
@@ -75,9 +76,7 @@ export function DetailPanel({ rootInfo, detail, selected, loading, onNavigate }:
     <section className="panel detail" aria-label="详情">
       <header className="detail-header">
         <h2>
-          <span className={`icon ${detail.kind}`} aria-hidden="true">
-            {detail.kind === "dir" ? "📁" : "📄"}
-          </span>
+          <EntryIcon kind={detail.kind} />
           {detail.name}
         </h2>
         <p className="path">
@@ -85,21 +84,21 @@ export function DetailPanel({ rootInfo, detail, selected, loading, onNavigate }:
         </p>
       </header>
 
-      <dl className="fields">
-        <div className="field">
-          <dt>类型</dt>
-          <dd>
-            {detail.kind === "dir"
-              ? `目录（${detail.child_count ?? 0} 个子项）`
-              : "文件"}
-          </dd>
-        </div>
-        <div className="field">
-          <dt>简介</dt>
-          <dd>{detail.desc || "（待补）"}</dd>
-        </div>
-      </dl>
+      {detail.tags.length > 0 && (
+        <section className="detail-section">
+          <h3>标签</h3>
+          <ul className="chips">
+            {detail.tags.map((tag) => (
+              <li key={tag} className="chip" title={tagDict[tag] ?? ""}>
+                {tag}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
+      <p className="entry-kind muted">{detail.kind === "dir" ? `目录 · ${detail.child_count ?? 0} 个子项` : "文件"}</p>
+      <p className="detail-lead">{detail.desc || "（待补）"}</p>
       {detail.detail.length > 0 && (
         <section className="detail-section">
           <h3>完整描述</h3>
@@ -137,21 +136,8 @@ export function DetailPanel({ rootInfo, detail, selected, loading, onNavigate }:
         </section>
       )}
 
-      {detail.tags.length > 0 && (
-        <section className="detail-section">
-          <h3>标签</h3>
-          <ul className="chips">
-            {detail.tags.map((tag) => (
-              <li key={tag} className="chip" title={tagDict[tag] ?? ""}>
-                {tag}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      <section className="detail-section">
-        <h3>标志</h3>
+      <details className="detail-section raw-flags">
+        <summary>快照原始标志</summary>
         <ul className="flags">
           <li>
             <span className="flag-name">hidden</span>
@@ -170,7 +156,7 @@ export function DetailPanel({ rootInfo, detail, selected, loading, onNavigate }:
             </code>
           </li>
         </ul>
-      </section>
+      </details>
     </section>
   );
 }

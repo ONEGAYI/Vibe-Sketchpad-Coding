@@ -32,7 +32,7 @@ export function VirtualTree({
     <VirtualList
       count={rows.length}
       className="tree-viewport"
-      estimateSize={28}
+      estimateSize={34}
       overscan={10}
       scrollToIndex={selectedIndex}
       viewportProps={{

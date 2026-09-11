@@ -11,11 +11,13 @@ afterEach(() => {
 });
 
 describe("Breadcrumb", () => {
-  it("无选中时不渲染路径链", () => {
+  it("无选中时根面包屑常驻且不能复制路径", () => {
     const { container } = render(
       <Breadcrumb rootName="演示仓库" selected={null} onNavigate={() => {}} />,
     );
-    expect(container.querySelector(".breadcrumb")).toBeNull();
+    expect(container.querySelector(".breadcrumb")).not.toBeNull();
+    expect(container.querySelector(".crumb")?.textContent).toBe("演示仓库");
+    expect((container.querySelector(".copy-button") as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("按路径分段渲染：根可点、各级目录可点、末级为当前条目", () => {
