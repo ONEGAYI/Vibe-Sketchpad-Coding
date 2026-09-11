@@ -28,6 +28,13 @@ from tree_tool import (  # noqa: E402
 )
 
 DEFAULT_ROOT_NAME = "tree"  # 快照无 root 键时的展示根名（viewer 无仓库上下文）
+DEFAULT_PAGE_SIZE = 50  # 搜索分页默认每页条数
+MAX_PAGE_SIZE = 200  # 搜索分页每页上限（防止一页拉全量，G14 按需）
+
+
+def _is_positive_int(value) -> bool:
+    """严格正整数判定（bool 是 int 子类，显式排除）。"""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
 
 
 class ViewerError(Exception):
@@ -71,7 +78,18 @@ class Snapshot:
         self.root_name: str = normalized.get("root") or DEFAULT_ROOT_NAME
         self.tags: dict[str, str] = dict(normalized.get("tags", {}))
         self.tree: dict = normalized["tree"]
+        # G13 内存索引：路径索引（walk_entries 规范序产出，dict 保序 = 确定性遍历序）
         self._nodes: dict[str, dict] = dict(walk_entries(self.tree, []))
+        # 标签索引：tag -> 命中路径列表（按 walk 序 append，序即确定性）
+        self._tag_index: dict[str, list[str]] = {}
+        # 反向关联索引：rel 目标 -> 引用者路径列表（等价于 query(rel_of=...) 全树扫描，
+        # 精确字符串成员匹配、无路径归一化；悬空目标同样入键，只是无人能查询到它）
+        self._reverse_rel: dict[str, list[str]] = {}
+        for path, node in self._nodes.items():
+            for tag in node.get("tags", []):
+                self._tag_index.setdefault(tag, []).append(path)
+            for target in node.get("rel", []):
+                self._reverse_rel.setdefault(target, []).append(path)
         dirs = sum(1 for node in self._nodes.values() if is_dir(node))
         self.counts = {"dirs": dirs, "files": len(self._nodes) - dirs, "total": len(self._nodes)}
 
@@ -127,6 +145,8 @@ class Snapshot:
         git_ignore 拆为 explicit（键缺省 None/显式 false/显式 true）与
         effective（沿祖先链就近覆写后的有效值），三态不混为一态（G07）。
         rel 每条附 exists 标记：目标不在快照中可识别、不致命（G09 预留）。
+        backrefs 为反向关联（谁引用了我），由反向索引派生，与
+        tree_tool query(rel_of=path) 结果等价；引用者必然在树中，exists 恒真。
         """
         parts = self._parts(path)
         if not parts:
@@ -144,6 +164,10 @@ class Snapshot:
                 {"path": target, "exists": target in self._nodes}
                 for target in node.get("rel", [])
             ],
+            "backrefs": [
+                {"path": source, "exists": True}
+                for source in self._reverse_rel.get("/".join(parts), [])
+            ],
             "tags": list(node.get("tags", [])),
             "collapsed": bool(node.get("collapsed", False)),
             "hidden": bool(node.get("hidden", False)),
@@ -152,6 +176,82 @@ class Snapshot:
                 "effective": self._effective_git_ignore(parts),
             },
             "child_count": len(node["children"]) if is_dir(node) else None,
+        }
+
+    def search(
+        self,
+        kw: str | None = None,
+        tag: str | None = None,
+        under: str | None = None,
+        depth: int | None = None,
+        page: int = 1,
+        page_size: int = DEFAULT_PAGE_SIZE,
+    ) -> dict:
+        """组合搜索（G08）：kw/tag/under/depth 各条件 AND，与 tree_tool.query 同语义。
+
+        - kw：casefold 子串，覆盖 path + desc + detail（多行 join 空格）；
+        - tag：tags 数组精确成员匹配（走标签索引，候选集本身是 walk 序）；
+        - under：段级前缀比较（锚点必须是树中目录、自身含入；src 不纳 src2）；
+        - depth：相对锚点层数上限（≥1 整数，须与 under 同用；锚点自身相对深度 0）；
+        - 结果顺序 = walk_entries 规范序（确定性）；分页对同一序列切片，不漏不重。
+        越界页返回空 results、total 照常报告；空结果 total=0 / total_pages=0。
+        """
+        if not _is_positive_int(page):
+            raise ViewerError(f"page 必须是正整数: {page!r}", 400)
+        if not _is_positive_int(page_size) or page_size > MAX_PAGE_SIZE:
+            raise ViewerError(
+                f"page_size 必须是 1..{MAX_PAGE_SIZE} 的整数: {page_size!r}", 400
+            )
+        under_parts: list[str] | None = None
+        if under is not None and under != "":
+            under_parts = self._parts(under)
+            anchor = self.find(under)
+            if anchor is None:
+                raise ViewerError(f"under 不是树中目录条目: {under}", 404)
+            if not is_dir(anchor):
+                raise ViewerError(f"under 不是目录，没有子树: {under}", 400)
+        if depth is not None:
+            if under_parts is None:
+                raise ViewerError("depth 须与 under 同用（限定目录子树的相对层数）", 400)
+            if not _is_positive_int(depth):
+                raise ViewerError(f"depth 必须是正整数: {depth!r}", 400)
+        kw_fold = kw.casefold() if kw else None
+
+        # 候选集：有标签条件时走标签索引（walk 序），否则全量路径索引
+        candidates = self._tag_index.get(tag, []) if tag else self._nodes
+        hits: list[tuple[str, dict]] = []
+        for path in candidates:
+            node = self._nodes[path]
+            parts = path.split("/")
+            if under_parts is not None and parts[: len(under_parts)] != under_parts:
+                continue
+            if depth is not None and len(parts) - len(under_parts) > depth:
+                continue
+            if kw_fold is not None:
+                haystack = " ".join(
+                    [path, node.get("desc", ""), " ".join(node.get("detail", []))]
+                ).casefold()
+                if kw_fold not in haystack:
+                    continue
+            hits.append((path, node))
+
+        total = len(hits)
+        total_pages = (total + page_size - 1) // page_size
+        start = (page - 1) * page_size
+        return {
+            "query": {
+                "kw": kw or None,
+                "tag": tag or None,
+                "under": under or None,
+                "depth": depth if depth is not None else None,
+            },
+            "total": total,
+            "total_pages": total_pages,
+            "page": page,
+            "page_size": page_size,
+            "results": [
+                self._hit_summary(path, node) for path, node in hits[start : start + page_size]
+            ],
         }
 
     def root_info(self) -> dict:
@@ -179,6 +279,22 @@ class Snapshot:
     @staticmethod
     def _join(prefix: str, name: str) -> str:
         return f"{prefix}/{name}" if prefix else name
+
+    @staticmethod
+    def _hit_summary(path: str, node: dict) -> dict:
+        """搜索结果条目：字段集与 tree_tool query --json 同口径（snake_case 命名
+        沿用本查看器 API 习惯，git_ignore 三态 null/false/true 不混为一态）。"""
+        return {
+            "path": path,
+            "kind": "dir" if is_dir(node) else "file",
+            "desc": node.get("desc", ""),
+            "detail": list(node.get("detail", [])),
+            "rel": list(node.get("rel", [])),
+            "tags": list(node.get("tags", [])),
+            "collapsed": bool(node.get("collapsed", False)),
+            "hidden": bool(node.get("hidden", False)),
+            "git_ignore": node.get("git-ignore"),
+        }
 
     def _effective_git_ignore(self, parts: list[str]) -> bool:
         """git-ignore 有效值：沿祖先链（含自身）最近一次显式设置生效。
