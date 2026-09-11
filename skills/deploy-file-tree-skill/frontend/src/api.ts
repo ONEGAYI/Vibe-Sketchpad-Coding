@@ -1,6 +1,7 @@
 /** 快照查询 API 封装：只读 GET，错误统一抛 ApiError（消息来自后端 error 字段）。 */
 
-import type { ChildEntry, EntryDetail, RootInfo } from "./types";
+import type { ChildEntry, EntryDetail, RootInfo, SearchResponse } from "./types";
+import { buildSearchQuery, type SearchFormParams } from "./searchUtils";
 
 export class ApiError extends Error {
   constructor(
@@ -38,4 +39,7 @@ export const api = {
     ),
   /** 条目详情（按需） */
   detail: (path: string) => getJson<EntryDetail>(`/api/detail?path=${encodeURIComponent(path)}`),
+  /** 组合搜索（G08）：kw/tag/under 可组合，分页 page/pageSize */
+  search: (params: SearchFormParams, page = 1, pageSize = 50) =>
+    getJson<SearchResponse>(`/api/search?${buildSearchQuery(params, page, pageSize)}`),
 };

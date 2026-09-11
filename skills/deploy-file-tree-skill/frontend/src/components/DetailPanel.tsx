@@ -1,4 +1,4 @@
-import type { EntryDetail, RootInfo } from "../types";
+import type { EntryDetail, RelRef, RootInfo } from "../types";
 import { gitIgnoreLabel } from "../format";
 
 interface DetailPanelProps {
@@ -6,10 +6,31 @@ interface DetailPanelProps {
   detail: EntryDetail | null;
   selected: string | null;
   loading: boolean;
+  /** 关联跳转：沿正向/反向关联定位到目标条目（展开祖先并选中） */
+  onNavigate: (path: string) => void;
 }
 
-/** 右栏：未选择时显示快照概览；选择后显示条目详情（路径/desc/detail/tags/标志）。 */
-export function DetailPanel({ rootInfo, detail, selected, loading }: DetailPanelProps) {
+/** 关联引用行：已知条目可点击跳转；悬空目标标记"无法定位"且不可点击。 */
+function RelRefItem({ item, onNavigate }: { item: RelRef; onNavigate: (path: string) => void }) {
+  if (!item.exists) {
+    return (
+      <li className="dangling">
+        <code>{item.path}</code>
+        <span className="badge badge-dangling">无法定位：目标不在快照中</span>
+      </li>
+    );
+  }
+  return (
+    <li>
+      <button type="button" className="link-button rel-link" onClick={() => onNavigate(item.path)}>
+        <code>{item.path}</code>
+      </button>
+    </li>
+  );
+}
+
+/** 右栏：未选择时显示快照概览；选择后显示条目详情（路径/desc/detail/tags/双向关联/标志）。 */
+export function DetailPanel({ rootInfo, detail, selected, loading, onNavigate }: DetailPanelProps) {
   if (selected === null) {
     return (
       <section className="panel detail" aria-label="详情">
@@ -90,19 +111,29 @@ export function DetailPanel({ rootInfo, detail, selected, loading }: DetailPanel
         </section>
       )}
 
-      {detail.rel.length > 0 && (
+      {(detail.rel.length > 0 || detail.backrefs.length > 0) && (
         <section className="detail-section">
-          <h3>关联（rel）</h3>
-          <ul className="rel-list">
-            {detail.rel.map((ref) => (
-              <li key={ref.path} className={ref.exists ? "" : "dangling"}>
-                <code>{ref.path}</code>
-                {!ref.exists && (
-                  <span className="badge badge-dangling">悬空：目标不在快照中</span>
-                )}
-              </li>
-            ))}
-          </ul>
+          <h3>关联</h3>
+          {detail.rel.length > 0 && (
+            <>
+              <p className="rel-direction">引用 →（当前条目关联的目标）</p>
+              <ul className="rel-list">
+                {detail.rel.map((ref) => (
+                  <RelRefItem key={ref.path} item={ref} onNavigate={onNavigate} />
+                ))}
+              </ul>
+            </>
+          )}
+          {detail.backrefs.length > 0 && (
+            <>
+              <p className="rel-direction">被引用 ←（引用当前条目的来源）</p>
+              <ul className="rel-list">
+                {detail.backrefs.map((ref) => (
+                  <RelRefItem key={ref.path} item={ref} onNavigate={onNavigate} />
+                ))}
+              </ul>
+            </>
+          )}
         </section>
       )}
 
