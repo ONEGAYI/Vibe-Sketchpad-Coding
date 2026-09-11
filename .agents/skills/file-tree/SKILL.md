@@ -81,3 +81,17 @@ root [<名字>|--clear]            # 查看/固定/清除渲染根名；未固�
 ## 渲染产物索引
 
 简版树（一句话速览）与标签词表两个标记块统一渲染在 **AGENTS.md**（无标记时由 `render` 自动附加到文件尾部）。需要完整描述时用 `get <path>`/`query --kw` 查询 tree.json，不渲染第二棵树。
+
+## 只读查看器（GUI）
+
+浏览快照不必读 JSON 原文：技能自带只读网页查看器，**运行只需 Python 3 与现代浏览器，无需 Node**（页面发行资源随技能部署在技能目录 `viewer/`）：
+
+```bash
+python .agents/skills/file-tree/scripts/viewer.py <tree.json 路径> [--port N] [--host H]
+```
+
+- 启动后打印访问地址（默认 `http://127.0.0.1:8618/`），按 Ctrl+C 停止；默认只监听本机，远端访问请自行建立 SSH 隧道
+- 快照可位于仓库之外（如从旧机 SCP 拉来的 JSON），无需源码、`.git` 或 AGENTS.md
+- 绝对只读：浏览、搜索、刷新不写数据、不触发格式转换、不生成撤销历史
+- **替换 tree.json 后在页面点刷新即可**（重读同一路径），不必重新构建或重启
+- 大样本生成与服务端性能基准（仅构建/实测场景）：`scripts/gen_viewer_sample.py` / `scripts/bench_viewer.py`；查看器契约测试 `python .agents/skills/file-tree/scripts/viewer_test.py`
