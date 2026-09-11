@@ -49,7 +49,7 @@ export function SearchResults({
           className="hits-viewport"
           estimateSize={44}
           overscan={8}
-          viewportProps={{ role: "listbox", "aria-label": "搜索结果" }}
+          viewportProps={{ role: "listbox", tabIndex: 0, "aria-label": "搜索结果" }}
           renderItem={(index) => {
             const hit = resp.results[index];
             return (

@@ -22,7 +22,9 @@ import { existsInCache, reconcileAfterRefresh } from "./refreshReconcile";
 type LeftView = "tree" | "search";
 export type ChildrenLoadState = { status: "loading" | "error" | "missing"; message?: string };
 
-export function useTreeBrowser() {
+export function useTreeBrowser(hierarchyOpen = false) {
+  const hierarchyRef = useRef(hierarchyOpen);
+  hierarchyRef.current = hierarchyOpen;
   const [rootInfo, setRootInfo] = useState<RootInfo | null>(null);
   const [childrenCache, setChildrenCache] = useState<Map<string, ChildEntry[]>>(new Map());
   const [childrenState, setChildrenState] = useState<Map<string, ChildrenLoadState>>(new Map());
@@ -43,9 +45,28 @@ export function useTreeBrowser() {
   const generationGate = useMemo(() => createGenerationGate(), []);
   const detailSeq = useRef(0);
   const searchSeq = useRef(0);
+  const navigationSeq = useRef(0);
+  const cacheRef = useRef(childrenCache);
+  cacheRef.current = childrenCache;
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
+  const detailRef = useRef(detail);
+  detailRef.current = detail;
+  const detailGeneration = useRef<number | null>(null);
   // 失败路径重拉详情需读"最新"选中（闭包值可能已被刷新期间的用户操作改变）
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
+
+  const recoverMissing = useCallback((path: string) => {
+    const fallback = ancestors(path).filter((dir) => existsInCache(cacheRef.current, dir)).pop() ?? "";
+    navigationSeq.current += 1;
+    setHistory((current) => {
+      const entries = current.entries.filter((entry) => entry !== path);
+      const index = current.entries.slice(0, current.index + 1).filter((entry) => entry !== path).length - 1;
+      return pushSelection({ entries, index }, fallback);
+    });
+    setNotice(`条目 ${path} 已不存在，已回退到${fallback || "根概览"}`);
+  }, []);
 
   // 初始加载：根信息 + 根级子项（仅一级，深层按需拉取）；
   // root 响应确认首个后端世代，此后旧世代响应一律按章丢弃。
@@ -95,9 +116,14 @@ export function useTreeBrowser() {
             return;
           }
           setDetail(d);
+          detailGeneration.current = d.generation;
         })
         .catch((err) => {
           if (seq === detailSeq.current && epochGuard.isCurrent(epoch)) {
+            if (err instanceof ApiError && err.status === 404) {
+              recoverMissing(path);
+              return;
+            }
             setError(err instanceof Error ? err.message : String(err));
           }
         })
@@ -107,13 +133,13 @@ export function useTreeBrowser() {
     },
     // 自引用（重拉）依赖 deps 稳定的 useCallback 实例
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [epochGuard, generationGate],
+    [epochGuard, generationGate, recoverMissing],
   );
 
   // 选中变化 → 拉详情（seq 防同代乱序，epoch 防跨版本旧响应，
   // generation 防新 epoch 携旧快照内容的混用窗口）
   useEffect(() => {
-    if (selected === null) {
+    if (!selected) {
       detailSeq.current += 1; // 作废在途详情
       setDetail(null);
       setDetailLoading(false);
@@ -143,12 +169,11 @@ export function useTreeBrowser() {
         setChildrenState((current) => { const next = new Map(current); next.delete(dir); return next; });
         return true;
       }).catch((err) => {
-        if (epochGuard.isCurrent(epoch)) {
-          setChildrenState((current) => new Map(current).set(dir, {
-            status: err instanceof ApiError && err.status === 404 ? "missing" : "error",
-            message: err instanceof Error ? err.message : String(err),
-          }));
-        }
+        if (!epochGuard.isCurrent(epoch)) return false;
+        setChildrenState((current) => new Map(current).set(dir, {
+          status: err instanceof ApiError && err.status === 404 ? "missing" : "error",
+          message: err instanceof Error ? err.message : String(err),
+        }));
         throw err;
       }).finally(() => {
         if (childrenRequests.current.get(dir)?.promise === promise) childrenRequests.current.delete(dir);
@@ -179,6 +204,7 @@ export function useTreeBrowser() {
   /** 树行点击：选择（入历史）。 */
   const onRowClick = useCallback(
     (path: string) => {
+      navigationSeq.current += 1;
       setHistory((h) => pushSelection(h, path));
     },
     [],
@@ -196,9 +222,10 @@ export function useTreeBrowser() {
   // 搜索命中点击、关联跳转与面包屑共用；链上加载串行等待，保证层级顺序可见。
   const navigateTo = useCallback(
     async (path: string) => {
+      const navigation = ++navigationSeq.current;
       if (path === "") {
-        // 面包屑根：回到目录树视图（选中不变）
         setLeftView("tree");
+        setHistory((current) => pushSelection(current, ""));
         return;
       }
       const epoch = epochGuard.current();
@@ -207,10 +234,13 @@ export function useTreeBrowser() {
           if (!childrenCache.has(dir) && !(await loadChildren(dir))) return;
         }
       } catch (err) {
+        if (navigation !== navigationSeq.current || !epochGuard.isCurrent(epoch)) return;
+        if (err instanceof ApiError && err.status === 404) { recoverMissing(path); return; }
         setError(err instanceof Error ? err.message : String(err));
         return;
       }
       if (!epochGuard.isCurrent(epoch)) return;
+      if (navigation !== navigationSeq.current) return;
       setExpanded((prev) => {
         const next = new Set(prev);
         for (const dir of ancestors(path)) next.add(dir);
@@ -219,7 +249,7 @@ export function useTreeBrowser() {
       setLeftView("tree");
       setHistory((h) => pushSelection(h, path));
     },
-    [childrenCache, loadChildren, epochGuard],
+    [childrenCache, loadChildren, epochGuard, recoverMissing],
   );
 
   /** 树容器键盘导航（G10）：↑↓ 选择、→ 展开/进入、← 折叠/跳父、Home/End。 */
@@ -234,13 +264,13 @@ export function useTreeBrowser() {
       if (action.type === "move") {
         const target = rows[action.index];
         if (target && target.entry !== null) {
-          setHistory((h) => pushSelection(h, target.entry!.path));
+          onRowClick(target.entry.path);
         }
       } else {
         applyToggle(action.path, action.open);
       }
     },
-    [childrenCache, expanded, selected, applyToggle],
+    [childrenCache, expanded, selected, applyToggle, onRowClick],
   );
 
   const runSearch = useCallback(
@@ -268,6 +298,7 @@ export function useTreeBrowser() {
 
   const onSearch = useCallback(
     (params: SearchFormParams) => {
+      navigationSeq.current += 1;
       runSearch(params, 1);
     },
     [runSearch],
@@ -304,6 +335,8 @@ export function useTreeBrowser() {
     setRefreshing(true);
     setNotice(null);
     const epoch = epochGuard.bump();
+    navigationSeq.current += 1;
+    const selectedAtStart = selectedRef.current;
     setChildrenState(new Map());
     detailSeq.current += 1; // 作废在途详情请求
     const searchSeqAtStart = searchSeq.current; // B3：刷新发起时的搜索序
@@ -316,13 +349,30 @@ export function useTreeBrowser() {
       const newCache = new Map<string, ChildEntry[]>();
       const top = await api.children("");
       if (!epochGuard.isCurrent(epoch)) return;
+      if (generationGate.isStale(top.generation)) throw new Error("根目录响应已过期，请重新刷新");
       generationGate.adopt(top.generation);
       newCache.set("", top.children);
-      for (const dir of expanded) {
-        if (dir === "") continue;
+      const attempted = new Set([""]);
+      // 刷新期间可改选；每次请求后重新读取当前链，而不是冻结点击刷新时的路径。
+      const requiredDirectories = () => {
+        const current = selectedRef.current;
+        const dirs = new Set(expanded);
+        if (current) {
+          for (const dir of ancestors(current)) dirs.add(dir);
+          const parent = current.split("/").slice(0, -1).join("/");
+          const entry = (newCache.get(parent) ?? cacheRef.current.get(parent))?.find((item) => item.path === current);
+          if (hierarchyRef.current && entry?.kind === "dir") dirs.add(current);
+        }
+        return dirs;
+      };
+      while (true) {
+        const dir = [...requiredDirectories()].find((path) => !attempted.has(path));
+        if (dir === undefined) break;
+        attempted.add(dir);
         try {
           const r = await api.children(dir);
           if (!epochGuard.isCurrent(epoch)) return;
+          if (generationGate.isStale(r.generation)) throw new Error(`目录 ${dir} 响应已过期，请重新刷新`);
           generationGate.adopt(r.generation);
           newCache.set(dir, r.children);
         } catch (err) {
@@ -333,10 +383,11 @@ export function useTreeBrowser() {
 
       const outcome = reconcileAfterRefresh({
         expanded,
-        selected,
+        selected: selectedRef.current,
         exists: (p) => existsInCache(newCache, p),
       });
       setChildrenCache(newCache);
+      cacheRef.current = newCache;
       setExpanded(new Set(outcome.keptExpanded));
       setRootInfo(resp);
 
@@ -344,13 +395,14 @@ export function useTreeBrowser() {
       // 刷新在途期间用户已改选时不得为旧选中重拉（N1：会作废用户在途详情
       // 并写入旧详情，右栏永久占位）——改选由其自身的详情 effect 负责；
       // 被删→回退目标入历史（selected 变化驱动 effect 重拉）；全删→清历史与详情
-      if (outcome.selected === null) {
-        setHistory(emptyHistory());
+      if (!outcome.selected) {
+        if (outcome.originalSelectedDeleted) recoverMissing(selectedRef.current!);
         setDetail(null);
         setDetailLoading(false);
       } else if (outcome.originalSelectedDeleted) {
-        setHistory((h) => pushSelection(h, outcome.selected!));
-      } else if (selectedRef.current === outcome.selected) {
+        recoverMissing(selectedRef.current!);
+      } else if (selectedRef.current === selectedAtStart ||
+        (detailRef.current?.path === outcome.selected && generationGate.isStale(detailGeneration.current))) {
         loadDetail(outcome.selected);
       }
       if (outcome.notice) setNotice(outcome.notice);
@@ -370,12 +422,18 @@ export function useTreeBrowser() {
       setError(`刷新失败：${msg}——当前仍显示旧数据（未刷新）`);
       // 失败时旧世代仍有效：被作废的在途详情按当前选中重拉（loading 走
       // 正常周期，右栏不永久占位）；被作废的展开目录重发（新 epoch 可通过）
-      if (selectedRef.current !== null) {
+      if (selectedRef.current) {
         loadDetail(selectedRef.current);
       } else {
         setDetailLoading(false);
       }
-      for (const dir of expanded) {
+      const recoveryDirs = new Set([...expandedRef.current, ...ancestors(selectedRef.current ?? "")]);
+      if (hierarchyRef.current && selectedRef.current) {
+        const current = selectedRef.current;
+        const parent = current.split("/").slice(0, -1).join("/");
+        if (cacheRef.current.get(parent)?.find((entry) => entry.path === current)?.kind === "dir") recoveryDirs.add(current);
+      }
+      for (const dir of recoveryDirs) {
         if (dir !== "" && !childrenCache.has(dir)) {
           loadChildren(dir).catch(() => {}); // 重拉失败静默：树数据未变，仅补齐展示
         }
@@ -397,6 +455,7 @@ export function useTreeBrowser() {
     runSearch,
     loadDetail,
     loadChildren,
+    recoverMissing,
   ]);
 
   const visibleRows = useMemo(
@@ -419,9 +478,12 @@ export function useTreeBrowser() {
     }
   }, [selected, childrenCache, loadChildren]);
 
-  const back = useCallback(() => setHistory((h) => goBack(h)), []);
-  const forward = useCallback(() => setHistory((h) => goForward(h)), []);
+  useEffect(() => { revealSelection(); }, [revealSelection]);
+
+  const back = useCallback(() => { navigationSeq.current += 1; setLeftView("tree"); setHistory((h) => goBack(h)); }, []);
+  const forward = useCallback(() => { navigationSeq.current += 1; setLeftView("tree"); setHistory((h) => goForward(h)); }, []);
   const showTree = useCallback(() => setLeftView("tree"), []);
+  const showSearch = useCallback(() => { navigationSeq.current += 1; if (searchResult) setLeftView("search"); }, [searchResult]);
   const dismissError = useCallback(() => setError(null), []);
   const dismissNotice = useCallback(() => setNotice(null), []);
 
@@ -430,7 +492,7 @@ export function useTreeBrowser() {
     error, notice, leftView, searchResult, searchLoading, refreshing,
     visibleRows, selectedIndex, rootChildren,
     canGoBack: canGoBack(history), canGoForward: canGoForward(history),
-    back, forward, showTree, dismissError, dismissNotice,
+    back, forward, showTree, showSearch, dismissError, dismissNotice,
     onRowClick, onToggle, navigateTo, onTreeKeyDown, onSearch,
     onPageChange, onHitClick, doRefresh,
     ensureChildren: loadChildren, revealSelection,

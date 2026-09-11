@@ -34,7 +34,7 @@ function RelRefItem({ item, onNavigate }: { item: RelRef; onNavigate: (path: str
 
 /** 右栏：未选择时显示快照概览；选择后显示条目详情（路径/desc/detail/tags/双向关联/标志）。 */
 export function DetailPanel({ rootInfo, detail, selected, loading, onNavigate, condensed = false, onReadFull }: DetailPanelProps) {
-  if (selected === null) {
+  if (!selected) {
     return (
       <section className="panel detail" aria-label="详情">
         <h2>{rootInfo ? rootInfo.root : "文件树查看器"}</h2>
@@ -68,7 +68,7 @@ export function DetailPanel({ rootInfo, detail, selected, loading, onNavigate, c
   if (loading || detail === null || detail.path !== selected) {
     return (
       <section className="panel detail" aria-label="详情">
-        <p className="muted">加载中…</p>
+        <p className="muted">{loading ? "加载中…" : "暂时无法显示详情，请刷新后重试。"}</p>
       </section>
     );
   }

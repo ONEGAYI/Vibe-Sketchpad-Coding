@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTreeBrowser } from "./useTreeBrowser";
 import { VirtualTree } from "./components/VirtualTree";
 import { DetailPanel } from "./components/DetailPanel";
@@ -16,16 +16,23 @@ const ROOT_PLACEHOLDER = "文件树查看器";
 
 /** 页面装配与帮助交互；浏览状态统一由控制层持有。 */
 export default function App() {
+  const [hierarchyOpen, setHierarchyOpen] = useState(false);
   const {
     rootInfo, childrenCache, childrenState, expanded, selected, detail, detailLoading,
     error, notice, leftView, searchResult, searchLoading, refreshing,
     visibleRows, selectedIndex, rootChildren, canGoBack, canGoForward,
-    back, forward, showTree, dismissError, dismissNotice,
+    back, forward, showTree, showSearch, dismissError, dismissNotice,
     onRowClick, onToggle, navigateTo, onTreeKeyDown, onSearch,
     onPageChange, onHitClick, doRefresh, ensureChildren, revealSelection,
-  } = useTreeBrowser();
+  } = useTreeBrowser(hierarchyOpen);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [hierarchyOpen, setHierarchyOpen] = useState(false);
+  const previousMode = useRef(hierarchyOpen);
+  useEffect(() => {
+    if (previousMode.current && !hierarchyOpen) {
+      document.querySelector<HTMLElement>('.tree-viewport, .hits-viewport')?.focus();
+    }
+    previousMode.current = hierarchyOpen;
+  }, [hierarchyOpen]);
   const collapseHierarchy = () => { revealSelection(); setHierarchyOpen(false); };
 
   // 全局快捷键：Alt+←/→ 历史导航、? 帮助、Esc 关帮助（输入控件内不劫持）
@@ -125,6 +132,7 @@ export default function App() {
       <SplitLayout expanded={hierarchyOpen}>
         <nav className="panel tree" aria-label="目录树">
           <div className="nav-heading"><span>文件导航</span>
+            {leftView !== "search" && searchResult && <button type="button" className="link-button return-search" onClick={showSearch}>返回搜索</button>}
             <button type="button" className="drawer-switch" aria-pressed={hierarchyOpen}
               title={hierarchyOpen ? "收起层级浏览，恢复普通侧栏宽度" : "展开抽屉，以多列层级浏览目录"}
               onClick={() => { if (hierarchyOpen) collapseHierarchy(); else setHierarchyOpen(true); }}>
