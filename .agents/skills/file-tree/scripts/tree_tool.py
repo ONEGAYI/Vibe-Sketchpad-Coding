@@ -5,6 +5,9 @@
 kind 由 children 判据推导（"file"/"dir"），规范化时无条件落盘供机器消费，
 不参与渲染、手改会被纠正；本脚本是唯一写入口，所有写命令执行后自动按
 确定性字典序（casefold + 码点决胜）规范化并重渲染产物。
+tree.json 持久化为紧凑 JSON（UTF-8 无 BOM、中文直存、无缩进、分隔符无空格、
+末尾恰好一个 LF）；历史的两空格缩进排版仍是合法可检形态（check 照常通过），
+不需要迁移命令——下一次任意写操作落盘时自动转为紧凑格式，不占撤销历史步。
 
 渲染目标为 AGENTS.md 的两个标记块（简版树 / 标签词表）：
 块内有标记则替换标记间内容；无标记则附加到文件尾部（带小节标题）；
@@ -198,7 +201,38 @@ def normalize_data(data: dict) -> dict:
 
 
 def dumps_canonical(data: dict) -> str:
+    """规范序列化（现行）：紧凑 JSON——无缩进、分隔符无额外空格、中文直存，末尾恰好一个 LF。"""
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+
+def dumps_canonical_legacy(data: dict) -> str:
+    """规范序列化（历史两空格缩进）：仅供 check 兼容判定与旧样本构造，写入路径不再使用。"""
     return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+
+
+def canonical_form(text: str) -> str | None:
+    """返回 text 的规范序列化形态："compact"（新紧凑）/ "legacy"（旧两空格缩进）/ None（非规范）。
+
+    CRLF 归一内聚于此（与 check 同口径）：先把行尾归一为 LF，再解析并规范化，
+    与两种规范输出做序列化文本级比较——键序、缩进、空字段等排版偏差都判否，
+    只比较 JSON 对象相等不足以通过；解析失败或结构非法同样判 None。
+    check 与部署器升级路径共用本判定（is_canonical_text 为其薄封装），
+    避免双格式接受标准漂移。
+    """
+    normalized = text.replace("\r\n", "\n")
+    try:
+        data = normalize_data(json.loads(normalized))
+    except (json.JSONDecodeError, ToolError):
+        return None
+    for form, out in (("compact", dumps_canonical(data)), ("legacy", dumps_canonical_legacy(data))):
+        if normalized == out:
+            return form
+    return None
+
+
+def is_canonical_text(text: str) -> bool:
+    """判定 text 是否为脚本规范的两种序列化形态之一（新紧凑 / 旧两空格缩进）。"""
+    return canonical_form(text) is not None
 
 
 def replace_block(text: str, begin: str, end: str, content: str) -> str:
@@ -977,10 +1011,10 @@ class TreeTool:
         except json.JSONDecodeError as exc:
             return ([f"E: tree.json 解析失败: {exc}"], [])
         try:
-            canonical = dumps_canonical(normalize_data(data))
+            normalize_data(data)
         except ToolError as exc:
             return ([f"E: tree.json 结构非法: {exc}"], [])
-        if canonical != text:
+        if not is_canonical_text(text):
             errors.append("E: tree.json 非脚本规范形态（键序/缩进/空字段），请只通过脚本命令修改")
 
         vocab = data.get("tags", {})

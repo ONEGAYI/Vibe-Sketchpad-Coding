@@ -3,11 +3,15 @@
 dist/ 是 file-tree 技能的发行版快照——公用四件套
 （SKILL.md / agents/openai.yaml / scripts/tree_tool.py / scripts/tree_tool_test.py），
 不含任何仓库数据。部署 = 复制四件套到目标仓库 .agents/skills/file-tree/，
-首跑初始化空 tree.json 并渲染 AGENTS.md 标记块，随后自动 check 自检；
-目标已有技能时是升级模式：镜像同步——以 dist 为准覆盖，清理 dist 中
-不存在的旧版本残留与 __pycache__，仅 tree.json 与本机撤销历史（.history.json）
-永不动（升级时允许对 tree.json 做规范化结构迁移，如补 kind 派生字段，
-数据语义不变），保证数据无损且废弃文件升级到位。
+首跑初始化空 tree.json（新紧凑规范格式）并渲染 AGENTS.md 标记块，随后自动
+check 自检；目标已有技能时是升级模式：镜像同步——以 dist 为准覆盖，清理
+dist 中不存在的旧版本残留与 __pycache__，仅 tree.json 与本机撤销历史
+（.history.json）永不动。tree.json 的升级判定与 check 同源（canonical_form，
+一次判定返回具体形态）：新旧两种规范排版（紧凑 / 两空格缩进）均为有效数据，
+部署不重写任何字节——旧排版留待下次正常写入时自动转换为新紧凑格式，已是
+新规范（含 CRLF 变体）无需提示；仅当结构不规范（如缺派生 kind 字段）才做
+规范化结构迁移（数据语义不变），且迁移经统一写入口直接输出新紧凑规范，
+保证数据无损且废弃文件升级到位。
 
 开发主线在主仓库（Vibe-Sketchpad-Coding）的 skills/deploy-file-tree-skill/dist/：
 直接改 dist、验证后逐仓库 deploy，并同步本机使用副本。update-dist 仅作应急
@@ -119,12 +123,17 @@ def deploy(
             tool.write_data({"tags": {}, "tree": {}})
             log.append("初始化空 tree.json")
         else:
-            # 结构升级迁移：旧版数据规范化重写（补 kind 等派生字段），数据语义不变
-            raw = tool.tree_json.read_text(encoding="utf-8")
-            data = tool.load()
-            if raw != ft.dumps_canonical(ft.normalize_data(data)):
-                tool.write_data(data)
+            # 升级判定与 check 同源（canonical_form 一次判定）：新旧两种规范
+            # 排版均为有效数据，部署不重写任何字节——旧两空格排版留待下次
+            # 正常写入时自动转换为新紧凑格式；已是新规范（含 CRLF 变体）无需
+            # 提示；仅当结构不规范（缺派生 kind 等）才做规范化结构迁移，
+            # 且经统一写入口直接输出新紧凑规范
+            form = ft.canonical_form(tool.tree_json.read_text(encoding="utf-8"))
+            if form is None:
+                tool.write_data(tool.load())
                 log.append("规范化迁移 tree.json（补派生字段，数据不变）")
+            elif form == "legacy":
+                log.append("tree.json 保留原排版不改写（下次写入时自动转换为新格式）")
         tool.render()
         log.append("已渲染 AGENTS.md 标记块")
         errors, _warnings = tool.check()
