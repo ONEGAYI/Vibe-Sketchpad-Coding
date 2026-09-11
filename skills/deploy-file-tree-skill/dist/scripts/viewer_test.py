@@ -297,18 +297,19 @@ class SnapshotApiTest(unittest.TestCase):
         # detail 多行与转义原样往返（G07）
         self.assertEqual(d["detail"], ["含\"双引号\"与\\反斜杠\\转义", "第二行说明"])
         self.assertEqual(d["tags"], ["script"])
-        # rel 边 + 悬空识别：目标不在快照中可识别、不致命（G09 预留）
+        # rel 边 + 悬空识别：目标不在快照中可识别、不致命（G09 预留）；
+        # rel 语义上经规范化排序去重，顺序为 sort_key 序
         self.assertEqual(
             d["rel"],
-            [{"path": "normal.md", "exists": True}, {"path": "gone.rs", "exists": False}],
+            [{"path": "gone.rs", "exists": False}, {"path": "normal.md", "exists": True}],
         )
         self.assertIsNone(d["child_count"])
 
     def test_detail_git_ignore_tri_state(self):
         # 键缺省 = 继承；有效值沿祖先链就近覆写（G07 三态不混为一态）
         cases = [
-            ("exempt", None, True),            # 显式 true
-            ("exempt/inherit.ts", None, True),  # 缺省 → 继承祖先 true
+            ("exempt", True, True),              # 显式 true
+            ("exempt/inherit.ts", None, True),   # 缺省 → 继承祖先 true
             ("exempt/optout.ts", False, False),  # 显式 false 覆写祖先
             ("apps/main.tsx", None, False),      # 全链缺省 → 不豁免
         ]
@@ -464,7 +465,7 @@ class ViewerHttpApiTest(HttpServerBase):
         status, payload = self.get_json(f"/api/detail?path={self.q('apps/main.tsx')}")
         self.assertEqual(status, 200)
         self.assertEqual(payload["detail"], ["含\"双引号\"与\\反斜杠\\转义", "第二行说明"])
-        self.assertEqual(payload["rel"][1], {"path": "gone.rs", "exists": False})
+        self.assertEqual(payload["rel"][0], {"path": "gone.rs", "exists": False})
         raw = json.dumps(payload, ensure_ascii=False)
         self.assertNotIn("util.ts", raw)  # 只含该条目，不夹带兄弟/深层数据
 
