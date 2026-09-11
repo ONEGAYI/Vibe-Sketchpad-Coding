@@ -29,8 +29,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from viewer_core import DEFAULT_PAGE_SIZE, Snapshot, ViewerError  # noqa: E402
 
-SKILL_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_STATIC_DIR = SKILL_ROOT / "frontend" / "build"  # Vite 构建产物（被忽略，不入库）
+SKILL_ROOT = Path(__file__).resolve().parents[1]
+# 受控发行静态资源（G18）：随技能入库与部署——母体位于 dist/viewer/，
+# 部署实例位于 <目标>/.agents/skills/file-tree/viewer/，运行只需 Python，
+# 不依赖 Node、npm install 或前端构建
+DEFAULT_STATIC_DIR = SKILL_ROOT / "viewer"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8618
 
@@ -234,11 +237,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._send_html(
                 503,
                 "<!doctype html><html lang=\"zh\"><meta charset=\"utf-8\">"
-                "<h3>前端尚未构建</h3>"
-                "<p>查看器缺少页面资源（未找到 index.html）。请在技能目录执行：</p>"
-                "<pre>cd skills/deploy-file-tree-skill/frontend\n"
+                "<h3>前端资源缺失</h3>"
+                "<p>查看器缺少发行页面资源（未找到 index.html）。本目录应为技能自带的"
+                " viewer/ 静态资源；若确为源码形态，请在技能目录执行：</p>"
+                "<pre>cd frontend\n"
                 "npm install\nnpm run build</pre>"
-                "<p>构建完成后重新启动查看器即可浏览；快照查询 API（/api/root 等）当前仍可用。</p>",
+                "<p>构建并组装到 viewer/ 后重新启动查看器即可浏览；快照查询 API（/api/root 等）当前仍可用。</p>",
             )
             return
         rel = unquote(url_path).lstrip("/")
@@ -345,8 +349,8 @@ def main(argv: list[str] | None = None) -> int:
     print("文件树只读查看器")
     print(f"快照: {snapshot_path}（{counts['total']} 条目：{counts['dirs']} 目录 / {counts['files']} 文件）")
     if not (server.static_dir / "index.html").is_file():
-        print(f"提示: 前端未构建（缺 {server.static_dir / 'index.html'}），页面暂不可用，API 仍可访问")
-        print("      构建方法: cd skills/deploy-file-tree-skill/frontend && npm install && npm run build")
+        print(f"提示: 发行页面资源缺失（缺 {server.static_dir / 'index.html'}），页面暂不可用，API 仍可访问")
+        print("      组装方法（需现代构建机的 Node）: cd frontend && npm install && npm run build")
     print(f"访问地址: http://{host}:{port}/")
     print("按 Ctrl+C 停止")
     sys.stdout.flush()

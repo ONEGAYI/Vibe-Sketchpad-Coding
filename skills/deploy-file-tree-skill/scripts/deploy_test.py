@@ -21,6 +21,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -619,7 +620,7 @@ class NoNodeLaunchTest(unittest.TestCase):
         self.assertTrue(detail["rel"][0]["exists"])
         back = self.get_json(port, "/api/detail?path=apps/util.ts")
         self.assertEqual([b["path"] for b in back["backrefs"]], ["apps/main.ts"])
-        search = self.get_json(port, "/api/search?kw=入口")
+        search = self.get_json(port, f"/api/search?kw={quote('入口')}")
         self.assertEqual(search["total"], 1)
         self.assertEqual(search["results"][0]["path"], "apps/main.ts")
 
