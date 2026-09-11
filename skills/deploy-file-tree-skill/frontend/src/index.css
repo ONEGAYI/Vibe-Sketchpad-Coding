@@ -1,0 +1,313 @@
+/* 文件树查看器：双栏布局（左目录树 / 右详情），浅色简洁风 */
+
+:root {
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --border: #dfe3e8;
+  --text: #24292f;
+  --muted: #6a737d;
+  --accent: #0969da;
+  --selected-bg: #e7f0fe;
+  --hidden-opacity: 0.55;
+  --danger: #cf222e;
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 14px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* 顶栏 */
+
+.topbar {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar .title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.error-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 16px;
+  background: #ffebe9;
+  color: var(--danger);
+  border-bottom: 1px solid #ffc1c0;
+}
+
+.error-bar button {
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+/* 双栏 */
+
+.columns {
+  display: flex;
+  flex: 1;
+  min-height: 0; /* 允许子栏各自滚动 */
+  gap: 10px;
+  padding: 10px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: auto;
+}
+
+.tree {
+  flex: 0 0 42%;
+  min-width: 320px;
+  padding: 6px 4px;
+}
+
+.detail {
+  flex: 1;
+  padding: 14px 18px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.loading {
+  padding: 10px;
+}
+
+.hint {
+  margin-top: 10px;
+}
+
+/* 目录树行 */
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.tree-row:hover {
+  background: #eef1f4;
+}
+
+.tree-row.selected {
+  background: var(--selected-bg);
+}
+
+.tree-row.is-hidden .name {
+  opacity: var(--hidden-opacity);
+}
+
+.toggle {
+  width: 18px;
+  flex: none;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.toggle.leaf {
+  cursor: default;
+  text-align: center;
+}
+
+.icon {
+  flex: none;
+}
+
+.tree-row .name {
+  font-weight: 500;
+}
+
+.tree-row .desc {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 徽章 */
+
+.badge {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 18px;
+  background: #eef1f4;
+  color: var(--muted);
+}
+
+.badge-hidden {
+  background: #fdf3e2;
+  color: #9a6700;
+}
+
+.badge-collapsed {
+  background: #eaeefc;
+  color: #5a67d8;
+}
+
+.badge-empty {
+  background: #eef1f4;
+  color: var(--muted);
+}
+
+.badge-dangling {
+  background: #ffebe9;
+  color: var(--danger);
+  margin-left: 6px;
+}
+
+/* 详情 */
+
+.detail h2 {
+  margin: 4px 0 6px;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.detail .path code {
+  display: inline-block;
+  padding: 2px 8px;
+  background: #f0f2f5;
+  border-radius: 6px;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.fields {
+  margin: 14px 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+}
+
+.fields dt {
+  color: var(--muted);
+}
+
+.fields dd {
+  margin: 0;
+}
+
+.detail-section {
+  margin: 16px 0;
+}
+
+.detail-section h3 {
+  font-size: 13px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+  margin: 0 0 8px;
+  letter-spacing: 0.5px;
+}
+
+.detail-line {
+  margin: 4px 0;
+  line-height: 1.6;
+}
+
+.rel-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.rel-list li {
+  margin: 4px 0;
+}
+
+.rel-list li.dangling code {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.chips {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0;
+  margin: 0;
+}
+
+.chip {
+  padding: 1px 10px;
+  border-radius: 10px;
+  background: #eaeefc;
+  color: #3849c9;
+  font-size: 12px;
+}
+
+.vocab {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.vocab li {
+  margin: 4px 0;
+}
+
+.flags {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.flags li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.flag-name {
+  width: 84px;
+  flex: none;
+  color: var(--muted);
+}
