@@ -1,0 +1,24 @@
+# 技能源码根忽略规则（G17）：独立分发时不依赖父仓库规则。
+# 注意：母体 dist/ 是发行快照，不是缓存——严禁在此写笼统 `dist/`。
+
+# 依赖
+node_modules/
+
+# Vite 构建产物与缓存（构建输出到 frontend/build/，供 Python 查看器托管）
+frontend/build/
+frontend/dist/
+.vite/
+node_modules/.vite/
+
+# TypeScript 增量缓存
+*.tsbuildinfo
+
+# 测试报告与覆盖率
+coverage/
+test-results/
+playwright-report/
+
+# 日志与环境
+*.log
+.env
+.env.*

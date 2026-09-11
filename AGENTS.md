@@ -42,6 +42,7 @@ Vibe-Sketchpad-Coding/
 | 标签 | 说明 |
 | --- | --- |
 | `doc` | 说明文档 |
+| `frontend` | 前端源码 |
 | `script` | 维护脚本 |
 | `skill` | 技能母体或部署实例的组成条目 |
 | `test` | 契约测试 |
