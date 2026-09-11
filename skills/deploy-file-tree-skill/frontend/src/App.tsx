@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api } from "./api";
 import type { ChildEntry, EntryDetail, RootInfo, SearchHit, SearchResponse } from "./types";
-import type { SearchFormParams } from "./searchUtils";
+import { paramsFromQuery, type SearchFormParams } from "./searchUtils";
 import { VirtualTree } from "./components/VirtualTree";
 import { DetailPanel } from "./components/DetailPanel";
 import { SearchBar } from "./components/SearchBar";
@@ -12,6 +12,7 @@ import {
   canGoBack,
   canGoForward,
   createEpochGuard,
+  createGenerationGate,
   currentPath,
   emptyHistory,
   goBack,
@@ -34,7 +35,9 @@ const ROOT_PLACEHOLDER = "文件树查看器";
  * - 左侧虚拟化目录树或搜索结果（只渲染视口附近行，十万条目不进 DOM），
  *   右侧条目详情；顶部搜索区 + 导航工具条（前进/后退/刷新/帮助）。
  * - 选择历史（前进/后退）覆盖树点击、键盘移动、搜索命中与关联跳转。
- * - 手动刷新原子换代（世代门闩作废在途回调，绝不明用旧版本响应）。
+ * - 手动刷新原子换代：世代门闩作废在途回调，世代号门比对后端 generation——
+ *   bump 后、服务端替换前发出的请求（新 epoch + 旧快照内容）按章丢弃，
+ *   绝不明用旧版本响应。
  * - 界面状态（expanded/选中/搜索）与快照 JSON 标志完全分离。
  */
 export default function App() {
@@ -54,15 +57,18 @@ export default function App() {
 
   const selected = currentPath(history);
   const epochGuard = useMemo(() => createEpochGuard(), []);
+  const generationGate = useMemo(() => createGenerationGate(), []);
   const detailSeq = useRef(0);
 
-  // 初始加载：根信息 + 根级子项（仅一级，深层按需拉取）
+  // 初始加载：根信息 + 根级子项（仅一级，深层按需拉取）；
+  // root 响应确认首个后端世代，此后旧世代响应一律按章丢弃
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const [root, top] = await Promise.all([api.root(), api.children("")]);
         if (cancelled) return;
+        generationGate.adopt(root.generation);
         setRootInfo(root);
         setChildrenCache(new Map([["", top.children]]));
       } catch (err) {
@@ -72,9 +78,10 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [generationGate]);
 
-  // 选中变化 → 拉详情（seq 防同代乱序，epoch 防跨版本旧响应）
+  // 选中变化 → 拉详情（seq 防同代乱序，epoch 防跨版本旧响应，
+  // generation 防新 epoch 携旧快照内容的混用窗口）
   useEffect(() => {
     if (selected === null) {
       setDetail(null);
@@ -88,7 +95,12 @@ export default function App() {
     api
       .detail(selected)
       .then((d) => {
-        if (seq === detailSeq.current && epochGuard.isCurrent(epoch)) setDetail(d);
+        if (
+          seq === detailSeq.current &&
+          epochGuard.isCurrent(epoch) &&
+          !generationGate.isStale(d.generation)
+        )
+          setDetail(d);
       })
       .catch((err) => {
         if (seq === detailSeq.current && epochGuard.isCurrent(epoch)) {
@@ -98,20 +110,23 @@ export default function App() {
       .finally(() => {
         if (seq === detailSeq.current) setDetailLoading(false);
       });
-  }, [selected, epochGuard]);
+  }, [selected, epochGuard, generationGate]);
 
-  /** 懒加载目录子项（G14 按需）：首次展开才请求；结果带 epoch 复核。 */
+  /** 懒加载目录子项（G14 按需）：首次展开才请求；结果带 epoch 复核，
+   * 旧世代响应（refresh bump 后、服务端替换前发出）按 generation 丢弃，
+   * 不写缓存——杜绝函数式回写把旧世代子项写回新缓存。 */
   const loadChildren = useCallback(
     (dir: string) => {
       const epoch = epochGuard.current();
       return api.children(dir).then((resp) => {
         if (!epochGuard.isCurrent(epoch)) return;
+        if (generationGate.isStale(resp.generation)) return;
         setChildrenCache((cur) =>
           cur.has(dir) ? cur : new Map(cur).set(dir, resp.children),
         );
       });
     },
-    [epochGuard],
+    [epochGuard, generationGate],
   );
 
   const applyToggle = useCallback(
@@ -234,6 +249,7 @@ export default function App() {
       try {
         const resp = await api.search(params, page);
         if (!epochGuard.isCurrent(epoch)) return;
+        if (generationGate.isStale(resp.generation)) return;
         setSearchResult(resp);
         setLeftView("search");
       } catch (err) {
@@ -244,7 +260,7 @@ export default function App() {
         if (epochGuard.isCurrent(epoch)) setSearchLoading(false);
       }
     },
-    [epochGuard],
+    [epochGuard, generationGate],
   );
 
   const onSearch = useCallback(
@@ -258,12 +274,7 @@ export default function App() {
     (page: number) => {
       if (searchResult === null) return;
       // 复用响应中的回显条件（query），保证翻页与首页同参（不漏不重）
-      const params: SearchFormParams = {
-        kw: searchResult.query.kw ?? "",
-        tag: searchResult.query.tag ?? "",
-        under: searchResult.query.under ?? "",
-      };
-      runSearch(params, page);
+      runSearch(paramsFromQuery(searchResult.query), page);
     },
     [searchResult, runSearch],
   );
@@ -279,6 +290,8 @@ export default function App() {
    * 手动刷新（G12）：POST /api/refresh 成功后整缓存重建（同一新世代），
    * 仍存在的展开目录与选中尽量保留；已删除路径按回退规则处理并提示。
    * 失败：报错并明确标示当前仍是旧数据；世代门闩作废全部在途回调。
+   * 成功即采纳新世代号：此后任何旧世代响应（含重建期间晚到的子项请求）
+   * 按 generation 丢弃，不写回新缓存。
    */
   const doRefresh = useCallback(async () => {
     if (refreshing) return;
@@ -289,6 +302,7 @@ export default function App() {
     try {
       const resp = await api.refresh();
       if (!epochGuard.isCurrent(epoch)) return;
+      generationGate.adopt(resp.generation);
 
       // 重建子项缓存：根级 + 仍存在的展开目录（404 = 已删除，直接跳过）
       const newCache = new Map<string, ChildEntry[]>();
@@ -328,12 +342,7 @@ export default function App() {
       setSearchResult(null);
       setLeftView("tree");
       if (searchResult !== null) {
-        const params: SearchFormParams = {
-          kw: searchResult.query.kw ?? "",
-          tag: searchResult.query.tag ?? "",
-          under: searchResult.query.under ?? "",
-        };
-        runSearch(params, 1);
+        runSearch(paramsFromQuery(searchResult.query), 1);
       }
     } catch (err) {
       if (!epochGuard.isCurrent(epoch)) return;
@@ -342,7 +351,7 @@ export default function App() {
     } finally {
       if (epochGuard.isCurrent(epoch)) setRefreshing(false);
     }
-  }, [refreshing, expanded, selected, searchResult, epochGuard, runSearch]);
+  }, [refreshing, expanded, selected, searchResult, epochGuard, generationGate, runSearch]);
 
   const visibleRows = useMemo(
     () => flattenVisibleRows(childrenCache, expanded),

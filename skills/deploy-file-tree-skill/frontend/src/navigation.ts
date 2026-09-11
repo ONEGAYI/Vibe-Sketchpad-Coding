@@ -74,3 +74,30 @@ export function createEpochGuard(): EpochGuard {
     isCurrent: (token: number) => token === generation,
   };
 }
+
+/**
+ * 世代号门：跟踪后端快照世代（response.generation），补 epoch 门闩的盲区。
+ *
+ * epoch 门闩只认"刷新点击序"——refresh bump 后、服务端原子替换前发出的
+ * 请求携带新 epoch 但内容属旧快照，晚到时 epoch 检查照样放行。世代号门
+ * 以服务端章为准：refresh 成功响应确认新世代后，任何旧世代响应（children
+ * 缓存回写 / detail / search）应用前比对 generation，低于已知世代即丢弃。
+ */
+export interface GenerationGate {
+  /** 采纳已确认的世代（root 初始加载、refresh 成功）；单调不回退。 */
+  adopt(generation: number): void;
+  /** 响应世代是否过期（低于已知世代）。尚未确认任何世代时一律不过期；
+   *  高于已知世代放行（错过确认时内容仍是新的，不误杀）。 */
+  isStale(generation: number | null): boolean;
+}
+
+export function createGenerationGate(): GenerationGate {
+  let known: number | null = null;
+  return {
+    adopt: (generation) => {
+      if (known === null || generation > known) known = generation;
+    },
+    isStale: (generation) =>
+      known !== null && generation !== null && generation < known,
+  };
+}

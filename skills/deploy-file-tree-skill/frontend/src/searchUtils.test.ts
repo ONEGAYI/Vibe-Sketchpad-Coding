@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { ancestorsOf, buildSearchQuery, canNext, canPrev, totalPages } from "./searchUtils";
+import {
+  ancestorsOf,
+  buildSearchQuery,
+  canNext,
+  canPrev,
+  paramsFromQuery,
+  totalPages,
+} from "./searchUtils";
 import type { SearchFormParams } from "./searchUtils";
 
 const empty: SearchFormParams = { kw: "", tag: "", under: "" };
@@ -51,6 +58,26 @@ describe("翻页可用性", () => {
     expect(canNext(1, 0)).toBe(false);
     expect(canNext(3, 3)).toBe(false);
     expect(canNext(2, 3)).toBe(true);
+  });
+});
+
+describe("paramsFromQuery（服务端回显条件 → 表单参数三字段）", () => {
+  it("null 归一为空串（空条件未提供的回显形态）", () => {
+    expect(
+      paramsFromQuery({ kw: null, tag: null, under: null, depth: null }),
+    ).toEqual({ kw: "", tag: "", under: "" });
+  });
+
+  it("非空值逐字段保留（depth 不参与表单）", () => {
+    expect(
+      paramsFromQuery({ kw: "渲染", tag: "doc", under: "src", depth: 2 }),
+    ).toEqual({ kw: "渲染", tag: "doc", under: "src" });
+  });
+
+  it("部分提供部分缺省混合归一", () => {
+    expect(paramsFromQuery({ kw: "readme", tag: null, under: "中文目录", depth: null })).toEqual(
+      { kw: "readme", tag: "", under: "中文目录" },
+    );
   });
 });
 

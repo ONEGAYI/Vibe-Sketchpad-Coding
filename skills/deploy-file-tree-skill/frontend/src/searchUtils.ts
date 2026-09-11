@@ -1,4 +1,5 @@
 /** 搜索与树定位的展示层纯函数：查询串拼装、分页边界、祖先链展开。 */
+import type { SearchQueryEcho } from "./types";
 
 export interface SearchFormParams {
   kw: string;
@@ -47,4 +48,10 @@ export function ancestorsOf(path: string): string[] {
     chain.push(parts.slice(0, i).join("/"));
   }
   return chain;
+}
+
+/** 服务端回显的查询条件 → 表单参数三字段（null 归一为空串；depth 不参与表单）。
+ * 翻页与刷新后按原条件重跑共用（同一回显形态 → 同一表单参数，不漏不重）。 */
+export function paramsFromQuery(query: SearchQueryEcho): SearchFormParams {
+  return { kw: query.kw ?? "", tag: query.tag ?? "", under: query.under ?? "" };
 }

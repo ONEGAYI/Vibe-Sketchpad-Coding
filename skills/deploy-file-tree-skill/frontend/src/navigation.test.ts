@@ -3,6 +3,7 @@ import {
   canGoBack,
   canGoForward,
   createEpochGuard,
+  createGenerationGate,
   currentPath,
   emptyHistory,
   goBack,
@@ -111,5 +112,42 @@ describe("世代门闩（epoch guard）：刷新后作废在途旧响应", () =>
     expect(guard.isCurrent(t1)).toBe(false);
     expect(guard.isCurrent(t2)).toBe(false);
     expect(guard.isCurrent(guard.current())).toBe(true);
+  });
+});
+
+describe("世代号门（generation gate）：响应 generation 与已知世代比对", () => {
+  it("未知世代（尚未确认任何快照版本）时一切响应都不算过期", () => {
+    const gate = createGenerationGate();
+    expect(gate.isStale(1)).toBe(false);
+    expect(gate.isStale(99)).toBe(false);
+  });
+
+  it("采纳已知世代后：同世代新鲜、旧世代过期", () => {
+    const gate = createGenerationGate();
+    gate.adopt(1);
+    expect(gate.isStale(1)).toBe(false);
+    expect(gate.isStale(0)).toBe(true);
+  });
+
+  it("refresh 成功采纳新世代：旧世代全部过期、新世代新鲜", () => {
+    const gate = createGenerationGate();
+    gate.adopt(1);
+    gate.adopt(2);
+    expect(gate.isStale(1)).toBe(true);
+    expect(gate.isStale(2)).toBe(false);
+  });
+
+  it("高于已知的世代不算过期（错过换代确认时内容仍是新的，放行）", () => {
+    const gate = createGenerationGate();
+    gate.adopt(1);
+    expect(gate.isStale(2)).toBe(false);
+  });
+
+  it("采纳单调：回退值不降低已知世代", () => {
+    const gate = createGenerationGate();
+    gate.adopt(2);
+    gate.adopt(1);
+    expect(gate.isStale(1)).toBe(true);
+    expect(gate.isStale(2)).toBe(false);
   });
 });
