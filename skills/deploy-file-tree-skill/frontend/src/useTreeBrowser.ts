@@ -45,6 +45,8 @@ export function useTreeBrowser(hierarchyOpen = false) {
   const generationGate = useMemo(() => createGenerationGate(), []);
   const detailSeq = useRef(0);
   const searchSeq = useRef(0);
+  // 保存最新已提交意图及其已展示世代；草稿仍由 SearchBar 独立维护。
+  const searchIntent = useRef<{ params: SearchFormParams; generation: number | null } | null>(null);
   const navigationSeq = useRef(0);
   const cacheRef = useRef(childrenCache);
   cacheRef.current = childrenCache;
@@ -274,15 +276,22 @@ export function useTreeBrowser(hierarchyOpen = false) {
   );
 
   const runSearch = useCallback(
-    async (params: SearchFormParams, page = 1) => {
+    async (params: SearchFormParams, page = 1, retriedStale = false): Promise<void> => {
       const seq = ++searchSeq.current; // 同代并发搜索乱序防护（B5）
       const epoch = epochGuard.current();
+      searchIntent.current = { params, generation: null };
       setSearchLoading(true);
       try {
         const resp = await api.search(params, page);
         if (seq !== searchSeq.current) return;
         if (!epochGuard.isCurrent(epoch)) return;
-        if (generationGate.isStale(resp.generation)) return;
+        if (generationGate.isStale(resp.generation)) {
+          // 最新查询晚回旧世代时只重试一次；新的用户查询仍由 seq 优先。
+          if (!retriedStale) return runSearch(params, 1, true);
+          setError("搜索响应已过期，请重新搜索");
+          return;
+        }
+        searchIntent.current = { params, generation: resp.generation };
         setSearchResult(resp);
         setLeftView("search");
       } catch (err) {
@@ -415,6 +424,11 @@ export function useTreeBrowser(hierarchyOpen = false) {
         if (searchResult !== null) {
           runSearch(paramsFromQuery(searchResult.query), 1);
         }
+      } else if (searchIntent.current && searchIntent.current.generation !== null &&
+        generationGate.isStale(searchIntent.current.generation)) {
+        // 刷新期间的新查询已经展示旧代结果：保留可见结果，按最新意图后台换代。
+        // 在途查询尚无 generation，交给 runSearch 收到响应时自行判定，避免重发。
+        runSearch(searchIntent.current.params, 1);
       }
     } catch (err) {
       if (!epochGuard.isCurrent(epoch)) return;
