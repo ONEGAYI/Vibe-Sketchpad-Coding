@@ -1,0 +1,31 @@
+{
+  "before": {
+    ".gitattributes": "7c6793a08292d2b87eb85ee8b2d8777cdf054c8320b5eb652544dabc3f908362",
+    "assets\\drawer-closed-D4q2I9XL.svg": "92ad244bdc47f44c8836b9bf45a2aa16b4ef526a062e39852688b283249d8d36",
+    "assets\\drawer-open-Vi9agT8n.svg": "6b031ba2714ecdce691d28fec59082944a33c499973315950528e974f4084bb6",
+    "assets\\index-B2Xy6itf.css": "f97556a241678fd9cb519f1a16c5e07ef8555781fae2e28327f6d465347f70d4",
+    "assets\\index-pPW_NAHy.js": "9b159f46c816d060367e833739412988d52c57594e32f2990966eef7ad7d1450",
+    "index.html": "c0a5286f79b3e6604c9e3bf6c8f25b1bed7e4e8a3c6674ecff45cd054a22fc91"
+  },
+  "after": {
+    ".gitattributes": "7c6793a08292d2b87eb85ee8b2d8777cdf054c8320b5eb652544dabc3f908362",
+    "assets\\drawer-closed-D4q2I9XL.svg": "92ad244bdc47f44c8836b9bf45a2aa16b4ef526a062e39852688b283249d8d36",
+    "assets\\drawer-open-Vi9agT8n.svg": "6b031ba2714ecdce691d28fec59082944a33c499973315950528e974f4084bb6",
+    "assets\\index-B2Xy6itf.css": "f97556a241678fd9cb519f1a16c5e07ef8555781fae2e28327f6d465347f70d4",
+    "assets\\index-pPW_NAHy.js": "9b159f46c816d060367e833739412988d52c57594e32f2990966eef7ad7d1450",
+    "index.html": "c0a5286f79b3e6604c9e3bf6c8f25b1bed7e4e8a3c6674ecff45cd054a22fc91"
+  },
+  "identical": true,
+  "lf_source_build": {
+    "hashes": {
+      ".gitattributes": "7c6793a08292d2b87eb85ee8b2d8777cdf054c8320b5eb652544dabc3f908362",
+      "index.html": "4f6abe398600c24f49ee838b2ca22777a9871335ecf368d103daf5484d1c6695",
+      "assets/drawer-closed-BEXoh82F.svg": "8df93803e881935557db9da3c12c973f4e9baccd8922079b08099a2613a4c1b0",
+      "assets/drawer-open-C8SjXDXq.svg": "96323653612155e5a0f92863edcea9a3112d3c73ff92ecf979dc11c57a97b9fa",
+      "assets/index-B2Xy6itf.css": "f97556a241678fd9cb519f1a16c5e07ef8555781fae2e28327f6d465347f70d4",
+      "assets/index-Hanlwe4Y.js": "16b0847995c91fa5986e4d79bf4067c7018ea1a8cd8dea35bbd8b76e4660b623"
+    },
+    "repeated_build": "assemble_viewer reported no changes after repeated npm run build",
+    "source_rule": "frontend/src/assets/.gitattributes: *.svg text eol=lf"
+  }
+}

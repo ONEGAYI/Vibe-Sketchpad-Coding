@@ -1,0 +1,6 @@
+{
+  "hit": "benchmarks/mod0005/file000050.ts",
+  "emptyDetail": 0,
+  "searches": 3,
+  "checks": "search page2, layout no requery, draft retained, return search, root overview, back, refresh, collapse"
+}

@@ -1,0 +1,11 @@
+{
+  "before": {
+    ".agents\\skills\\file-tree\\tree.json": "cd2ce3bf20afe9448af2432218e22b23a63e0cbb4e6ac37bc036dca1698f79ed",
+    ".git\\file-tree\\history.json": "b6f253aeb1b2e05f75f188b0468b5332b35370daff73a30b8ee42be5b76326fd"
+  },
+  "after": {
+    ".agents\\skills\\file-tree\\tree.json": "cd2ce3bf20afe9448af2432218e22b23a63e0cbb4e6ac37bc036dca1698f79ed",
+    ".git\\file-tree\\history.json": "b6f253aeb1b2e05f75f188b0468b5332b35370daff73a30b8ee42be5b76326fd"
+  },
+  "identical": true
+}
