@@ -40,7 +40,7 @@ export function SearchBar({ tagVocab, onSearch, loading, appliedFilters }: Searc
       <button type="submit" className="search-button" disabled={loading}>
         {loading ? "搜索中…" : "搜索"}
       </button>
-      <button type="button" className="search-button secondary filter-toggle" aria-expanded={filtersOpen}
+      <button type="button" className="search-button secondary" aria-expanded={filtersOpen}
         aria-controls={filtersId} onClick={() => setFiltersOpen((open) => !open)}>
         筛选{activeCount > 0 ? `（已生效 ${activeCount}）` : ""}
       </button>

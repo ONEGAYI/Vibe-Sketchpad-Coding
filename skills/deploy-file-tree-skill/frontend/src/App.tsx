@@ -132,7 +132,7 @@ export default function App() {
       <SplitLayout expanded={hierarchyOpen}>
         <nav className="panel tree" aria-label="目录树">
           <div className="nav-heading"><span>文件导航</span>
-            {leftView !== "search" && searchResult && <button type="button" className="link-button return-search" onClick={showSearch}>返回搜索</button>}
+            {leftView !== "search" && searchResult && <button type="button" className="link-button" onClick={showSearch}>返回搜索</button>}
             <button type="button" className="drawer-switch" aria-pressed={hierarchyOpen}
               title={hierarchyOpen ? "收起层级浏览，恢复普通侧栏宽度" : "展开抽屉，以多列层级浏览目录"}
               onClick={() => { if (hierarchyOpen) collapseHierarchy(); else setHierarchyOpen(true); }}>

@@ -490,43 +490,33 @@ describe("浏览布局与控制层页面契约", () => {
 });
 
 describe("世代号混用窗口：旧世代响应按 generation 丢弃", () => {
-  it("晚到的旧世代 children 响应不得写回缓存：重新展开重新拉取新世代子项", async () => {
+  it("刷新期间展开的目录换代后保留展开，晚到旧世代 children 不写回缓存", async () => {
     render(<App />);
     await loadInitialGen1();
 
     // 刷新在途（POST 挂起）→ 用户展开 dirX：请求发出时服务端仍是旧快照（gen1）
     fireEvent.click(screen.getByRole("button", { name: "刷新" }));
     fireEvent.click(screen.getByRole("button", { name: "展开 dirX" }));
-    const oldChildrenReq = await waitForReq(
+    const staleReq = await waitForReq(
       "GET",
       "/api/children",
       (q) => q.get("path") === "dirX",
     );
 
-    // 服务端换代（gen2）：doRefresh 以点击刷新那一刻的展开集重建缓存（不含
-    // dirX——闭包快照），随后旧世代响应才晚到：epoch 检查通过（bump 后发起），
-    // 只有 generation 比对能拦下
-    await settleRefreshGen2();
-    oldChildrenReq.resolve(
-      jsonOk({
-        generation: 1,
-        path: "dirX",
-        children: [fileEntry("dirX/oldchild.ts", "旧世代子项")],
-      }),
+    // 换代（gen2）：重建循环按实时展开集（expandedRef）纳入 dirX，而非闭包快照；
+    // 旧世代响应晚到时 epoch 检查通过（bump 后发起），只有 generation 比对能拦下
+    const refreshReq = await waitForReq("POST", "/api/refresh");
+    refreshReq.resolve(jsonOk({ ...rootInfoPayload(2, 2), refreshed: true }));
+    const topReq = await waitForReq("GET", "/api/children", (q) => q.get("path") === "");
+    topReq.resolve(
+      jsonOk({ generation: 2, path: "", children: [ROOT_DIRX, ROOT_KEEP] }),
     );
-    // 晚到响应处理完（若被错误写回，缓存即污染）
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "展开 dirX" })).toBeDefined(),
-    );
-
-    // 重新展开 dirX：缓存未污染时应重新发起请求并拿到 gen2 新子项
-    fireEvent.click(screen.getByRole("button", { name: "展开 dirX" }));
-    const newChildrenReq = await waitForReq(
+    const rebuildReq = await waitForReq(
       "GET",
       "/api/children",
       (q) => q.get("path") === "dirX",
     );
-    newChildrenReq.resolve(
+    rebuildReq.resolve(
       jsonOk({
         generation: 2,
         path: "dirX",
@@ -534,9 +524,22 @@ describe("世代号混用窗口：旧世代响应按 generation 丢弃", () => {
       }),
     );
     await waitFor(() =>
+      expect(screen.getByRole("button", { name: "刷新" })).toBeDefined(),
+    );
+
+    // 旧世代响应晚到：不得写回缓存污染新世代子项
+    staleReq.resolve(
+      jsonOk({
+        generation: 1,
+        path: "dirX",
+        children: [fileEntry("dirX/oldchild.ts", "旧世代子项")],
+      }),
+    );
+    await waitFor(() =>
       expect(document.querySelector('[data-path="dirX/newchild.ts"]')).not.toBeNull(),
     );
-    // 旧世代子项不得出现在任何位置（复活即失败）
+    // 刷新期间的展开被保留（不回滚为折叠）；旧世代子项不得出现在任何位置
+    expect(screen.queryByRole("button", { name: "展开 dirX" })).toBeNull();
     expect(document.querySelector('[data-path="dirX/oldchild.ts"]')).toBeNull();
   });
 
@@ -875,5 +878,150 @@ describe("第 3 轮复核回归（N1/N2）", () => {
     retryReq.resolve(jsonOk(detailPayload(2, "keep.ts", "新世代详情")));
     await waitFor(() => expect(screen.getByText("新世代详情")).toBeDefined());
     expect(screen.queryByText("过期内容")).toBeNull();
+  });
+});
+
+describe("第二轮审查回归（R1/R4/R7/R10/R11）", () => {
+  it("R1：折叠选中项祖先后再触发懒加载完成，折叠不被弹回", async () => {
+    render(<App />);
+    // 初始：dirX、dirY 两个目录（dirY 用于触发 childrenCache 引用变化）
+    const rootReq = await waitForReq("GET", "/api/root");
+    const childrenReq = await waitForReq("GET", "/api/children", (q) => q.get("path") === "");
+    rootReq.resolve(jsonOk(rootInfoPayload(1, 2)));
+    childrenReq.resolve(
+      jsonOk({
+        generation: 1,
+        path: "",
+        children: [ROOT_DIRX, dirEntry("dirY", "另一目录", 1), ROOT_KEEP],
+      }),
+    );
+    await waitFor(() => expect(screen.getByText("dirX")).toBeDefined());
+
+    // 选中 dirX/deep.ts：revealSelection 补齐祖先（此时祖先已展开，应为无变化操作）
+    fireEvent.click(screen.getByRole("button", { name: "展开 dirX" }));
+    (await waitForReq("GET", "/api/children", (q) => q.get("path") === "dirX")).resolve(
+      jsonOk({ generation: 1, path: "dirX", children: [fileEntry("dirX/deep.ts", "深层文件")] }),
+    );
+    await waitFor(() => expect(screen.getByText("deep.ts")).toBeDefined());
+    fireEvent.click(screen.getByText("deep.ts"));
+    (await waitForReq("GET", "/api/detail", (q) => q.get("path") === "dirX/deep.ts")).resolve(
+      jsonOk(detailPayload(1, "dirX/deep.ts", "深层详情")),
+    );
+    await screen.findByText("深层详情");
+
+    // 用户显式折叠祖先 dirX
+    fireEvent.click(screen.getByRole("button", { name: "折叠 dirX" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "展开 dirX" })).toBeDefined());
+
+    // 另一目录懒加载完成（childrenCache 引用变化）
+    fireEvent.click(screen.getByRole("button", { name: "展开 dirY" }));
+    (await waitForReq("GET", "/api/children", (q) => q.get("path") === "dirY")).resolve(
+      jsonOk({ generation: 1, path: "dirY", children: [fileEntry("dirY/other.ts", "其他文件")] }),
+    );
+    await waitFor(() => expect(screen.getByText("other.ts")).toBeDefined());
+
+    // dirX 必须保持折叠：revealSelection 只在选中变化时补齐祖先，
+    // 不随缓存变化重放并把用户折叠弹回
+    expect(screen.getByRole("button", { name: "展开 dirX" })).toBeDefined();
+  });
+
+  it("R4：初始加载响应迟到且刷新已换代时，旧世代初始数据不得覆盖界面", async () => {
+    render(<App />);
+    const initRoot = await waitForReq("GET", "/api/root");
+    const initChildren = await waitForReq("GET", "/api/children", (q) => q.get("path") === "");
+
+    // 初始请求在途时用户刷新并完成换代（gen2）
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    (await waitForReq("POST", "/api/refresh")).resolve(jsonOk({ ...rootInfoPayload(2, 2), refreshed: true }));
+    (await waitForReq("GET", "/api/children", (q) => q.get("path") === "")).resolve(
+      jsonOk({ generation: 2, path: "", children: [ROOT_DIRX, ROOT_KEEP] }),
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "刷新" })).toBeDefined());
+
+    // 初始 gen1 响应迟到：epoch 已被刷新作废，不得覆盖 gen2 的缓存与根信息
+    initRoot.resolve(jsonOk(rootInfoPayload(1, 2)));
+    initChildren.resolve(jsonOk({ generation: 1, path: "", children: [fileEntry("stale.ts", "旧世代条目")] }));
+    await waitFor(() => expect(screen.getByText("dirX")).toBeDefined());
+    expect(screen.queryByText("stale.ts")).toBeNull();
+  });
+
+  it("R7：navigateTo 链上子项被世代门拦下时给出提示而非静默", async () => {
+    render(<App />);
+    await loadInitialGen1();
+
+    // 本页刷新换代：世代门 known=2
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    (await waitForReq("POST", "/api/refresh")).resolve(jsonOk({ ...rootInfoPayload(2, 2), refreshed: true }));
+    (await waitForReq("GET", "/api/children", (q) => q.get("path") === "")).resolve(
+      jsonOk({ generation: 2, path: "", children: [ROOT_DIRX, ROOT_KEEP] }),
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "刷新" })).toBeDefined());
+
+    // 搜索（gen2 响应）→ 点击命中 → 链上 loadChildren(dirX) 被旧世代（gen1）应答
+    fireEvent.change(screen.getByLabelText("关键词"), { target: { value: "深层" } });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    (await waitForReq("GET", "/api/search")).resolve(jsonOk(searchPayload(2, "深层", "深层文件", "dirX/deep.ts")));
+    await waitFor(() => expect(screen.getByText("dirX/deep.ts")).toBeDefined());
+    fireEvent.click(screen.getByText("dirX/deep.ts"));
+    (await waitForReq("GET", "/api/children", (q) => q.get("path") === "dirX")).resolve(
+      jsonOk({ generation: 1, path: "dirX", children: [fileEntry("dirX/deep.ts", "深层文件")] }),
+    );
+
+    // 不得静默返回：应有"快照已更新"提示引导用户重试
+    await waitFor(() => expect(screen.getByRole("status")).toBeDefined());
+    expect(screen.getByRole("status").textContent).toContain("快照已更新");
+  });
+
+  it("R10：树容器聚焦时 Alt+← 触发历史后退，不被树键盘导航吞掉", async () => {
+    render(<App />);
+    await loadInitialGen1();
+
+    // 历史：keep.ts → dirX/deep.ts
+    fireEvent.click(screen.getByText("keep.ts"));
+    (await waitForReq("GET", "/api/detail", (q) => q.get("path") === "keep.ts")).resolve(
+      jsonOk(detailPayload(1, "keep.ts", "保留文件")),
+    );
+    await screen.findByText("保留文件");
+    fireEvent.click(screen.getByRole("button", { name: "展开 dirX" }));
+    (await waitForReq("GET", "/api/children", (q) => q.get("path") === "dirX")).resolve(
+      jsonOk({ generation: 1, path: "dirX", children: [fileEntry("dirX/deep.ts", "深层文件")] }),
+    );
+    await waitFor(() => expect(screen.getByText("deep.ts")).toBeDefined());
+    fireEvent.click(screen.getByText("deep.ts"));
+    (await waitForReq("GET", "/api/detail", (q) => q.get("path") === "dirX/deep.ts")).resolve(
+      jsonOk(detailPayload(1, "dirX/deep.ts", "深层详情")),
+    );
+    await screen.findByText("深层详情");
+
+    // Alt+← 在树容器上：冒泡到 window 触发后退 → 选中回到 keep.ts；
+    // 若与树键盘导航冲突（← 跳父），选中会变成 dirX 而非 keep.ts
+    fireEvent.keyDown(document.querySelector(".tree-viewport")!, { key: "ArrowLeft", altKey: true });
+    const backDetail = await waitForReq("GET", "/api/detail", (q) => q.get("path") === "keep.ts");
+    backDetail.resolve(jsonOk(detailPayload(1, "keep.ts", "历史详情")));
+    await screen.findByText("历史详情");
+  });
+
+  it("R11：初始加载连续三轮世代不一致时以 children 世代兜底取 root", async () => {
+    render(<App />);
+    // 初次 + 两轮重取：root 与 children 世代始终不一致（gen1 vs gen2）
+    const root1 = await waitForReq("GET", "/api/root");
+    const children1 = await waitForReq("GET", "/api/children", (q) => q.get("path") === "");
+    root1.resolve(jsonOk(rootInfoPayload(1, 2)));
+    children1.resolve(jsonOk({ generation: 2, path: "", children: [ROOT_DIRX, ROOT_KEEP] }));
+    const root2 = await waitForReq("GET", "/api/root");
+    const children2 = await waitForReq("GET", "/api/children", (q) => q.get("path") === "");
+    root2.resolve(jsonOk(rootInfoPayload(1, 2)));
+    children2.resolve(jsonOk({ generation: 2, path: "", children: [ROOT_DIRX, ROOT_KEEP] }));
+    const root3 = await waitForReq("GET", "/api/root");
+    const children3 = await waitForReq("GET", "/api/children", (q) => q.get("path") === "");
+    root3.resolve(jsonOk(rootInfoPayload(1, 2)));
+    children3.resolve(jsonOk({ generation: 2, path: "", children: [ROOT_DIRX, ROOT_KEEP] }));
+
+    // 重试超限仍不一致 → 兜底：以 children 世代为准单独重取 root
+    const root4 = await waitForReq("GET", "/api/root");
+    root4.resolve(jsonOk(rootInfoPayload(2, 2)));
+    await waitFor(() => expect(screen.getByText("dirX")).toBeDefined());
+    // 兜底后收敛，不再无限重取
+    expect(pending.filter((r) => r.path === "/api/root")).toHaveLength(0);
   });
 });

@@ -1,6 +1,7 @@
 /* 文件树阅读工作台：浅色导航、可调宽侧栏与正文阅读排版。 */
 
 :root {
+  color-scheme: light;
   --bg: #fffefa;
   --panel: #fffefa;
   --sidebar: #f4f5f2;
@@ -369,21 +370,6 @@ button.crumb:hover {
   margin-left: 6px;
 }
 
-.fields {
-  margin: 14px 0;
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 6px 16px;
-}
-
-.fields dt {
-  color: var(--muted);
-}
-
-.fields dd {
-  margin: 0;
-}
-
 .rel-list {
   list-style: none;
   padding: 0;
@@ -581,9 +567,8 @@ summary:focus-visible, [tabindex]:focus-visible {
   flex: 1;
   min-height: 0;
   /* 允许子栏各自滚动 */
-  gap: 10px;
-  padding: 0;
   gap: 0;
+  padding: 0;
   min-width: 0;
 }
 
@@ -744,7 +729,6 @@ summary:focus-visible, [tabindex]:focus-visible {
 }
 
 .detail h2 {
-  font-size: 18px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -795,8 +779,6 @@ summary:focus-visible, [tabindex]:focus-visible {
 }
 
 .detail-section h3 {
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 4px;
   letter-spacing: 0.5px;
   font-size: 13px;
   margin: 0 0 12px;

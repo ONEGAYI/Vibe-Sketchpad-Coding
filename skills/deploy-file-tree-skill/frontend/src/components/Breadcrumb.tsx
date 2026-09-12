@@ -62,7 +62,7 @@ export function Breadcrumb({ rootName, selected, onNavigate }: BreadcrumbProps) 
         className="copy-button"
         disabled={!selected}
         onClick={onCopy}
-        title={`复制完整路径：${selected}`}
+        title={selected ? `复制完整路径：${selected}` : "复制完整路径"}
       >
         {copied ? "已复制" : "复制路径"}
       </button>
