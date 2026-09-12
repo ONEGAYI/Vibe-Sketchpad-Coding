@@ -68,6 +68,7 @@ export function SplitLayout({ children, expanded = false }: { children: ReactNod
         }}
         onPointerUp={finishDrag} onPointerCancel={finishDrag} onLostPointerCapture={finishDrag}
         onKeyDown={(event) => {
+          if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
           if (disabled || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
           event.preventDefault();
           setPreferred(sidebarGeometry(containerWidth, geometry.width + (event.key === "ArrowRight" ? 10 : -10)).width);

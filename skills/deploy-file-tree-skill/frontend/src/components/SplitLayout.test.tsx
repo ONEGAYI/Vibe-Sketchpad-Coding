@@ -6,6 +6,24 @@ import { SplitLayout, sidebarGeometry } from "./SplitLayout";
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("普通侧栏限位", () => {
+  it("分隔条不拦截带修饰键的历史快捷键或调宽", () => {
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({ width: 1024 } as DOMRect);
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    const onHistory = vi.fn();
+    render(<div onKeyDown={(event) => {
+      if (event.altKey && event.key === "ArrowLeft") onHistory(event.defaultPrevented);
+    }}><SplitLayout><div /><div /></SplitLayout></div>);
+    const separator = screen.getByRole("separator");
+    separator.focus();
+    fireEvent.keyDown(separator, { key: "ArrowLeft", altKey: true });
+    expect(separator.getAttribute("aria-valuenow")).toBe("310");
+    expect(onHistory).toHaveBeenCalledWith(false);
+    for (const modifier of ["ctrlKey", "metaKey", "shiftKey"]) {
+      fireEvent.keyDown(separator, { key: "ArrowRight", [modifier]: true });
+      expect(separator.getAttribute("aria-valuenow")).toBe("310");
+    }
+  });
+
   it("扣除分隔条后计算限位，并仅钳制显示首选宽度", () => {
     expect(sidebarGeometry(1024, 310)).toEqual({ available: 1015, stacked: false, min: 240, max: 440, width: 310 });
     expect(sidebarGeometry(800, 430).width).toBeCloseTo(363.86);
