@@ -23,8 +23,10 @@ tag 已登记标签）在 view-add 写盘前预检拒绝。剪影把选中集投
 任何视图不出现，空选中集渲染仅剩根名行。一个视图 id 可绑定一个或多个文档：
 全部绑定文档中的块内容完全相同（同一渲染产物镜像），任何数据变更后全部镜像
 同步刷新；绑定清单的增量增删走 view-doc（--rm 解绑默认保留块为孤儿，不再
-刷新）。同一文档内同 id 出现多于一个块属病态：相关命令（view-doc、view-add、
-触发渲染的数据命令）报错并指明文档路径与块数，不做猜测性修复。
+刷新）；视图删除走 view-rm（默认仅删配置保留块，--purge 连带按清单逐一
+删块：每文档删前校验恰好一个，原子拒绝半删状态）。同一文档内同 id 出现多
+于一个块属病态：相关命令（view-doc、view-add、触发渲染的数据命令）报错
+并指明文档路径与块数，不做猜测性修复。
 detail 完整描述只存于 tree.json 供查询，不渲染。渲染控制字段只影响树渲染：
 目录 collapsed=true 折叠（目录行带 … 不展开 children）；条目 hidden=true
 整体隐藏（含子树）；两者默认 false（不落盘），数据、查询与 check 校验始终
@@ -56,6 +58,7 @@ git 之外（未被跟踪且被 ignore 规则覆盖，二者违反其一均报�
   python tree_tool.py view-add <id> (--under <目录>)... [--tag <标签>]... [--exclude <目录>]...
                          [--filter <清单.json>] [--doc <路径> [--line N]]
   python tree_tool.py view-doc <id> (--add <路径> [--line N] | --rm <路径>)
+  python tree_tool.py view-rm <id> [--purge]
   python tree_tool.py view-list
   python tree_tool.py undo | redo | history
   python tree_tool.py check [--strict]
@@ -402,6 +405,8 @@ def remove_view_block(text: str, begin: str, end: str) -> str:
 
     上下空行是插入时补的保障行：删除块时连同上方那一行一并移除最接近
     还原插入前形态；围栏不存在（被手改破坏）时退化为只删 begin..end。
+    拼接点收敛：删除区间上方若残留原有空行（插入时被迫补前导空行的场景），
+    与下方保障空行相接会成双空行——去掉下方那个，删除动作自身不产生粘连。
     """
     lines = text.split("\n")
     try:
@@ -414,6 +419,8 @@ def remove_view_block(text: str, begin: str, end: str) -> str:
     stop = e + 2 if e + 1 < len(lines) and lines[e + 1] == FENCE else e + 1
     if start > 0 and lines[start - 1] == "":
         start -= 1
+    if start > 0 and stop < len(lines) and lines[start - 1] == "" and lines[stop] == "":
+        stop += 1  # 上方残留空行与下方保障空行相接：去其一，防双空行粘连
     return "\n".join(lines[:start] + lines[stop:])
 
 
@@ -1534,6 +1541,57 @@ class TreeTool:
             # （解绑文档不在清单中，其保留的块不再被触碰）
             self._render_view(view_id, self.load()["views"][view_id], self.load())
 
+    def view_rm(self, view_id: str, purge: bool = False) -> int:
+        """删除视图实体：默认仅从 views 配置删除（各绑定文档的块原样保留为
+        孤儿，此后不再被任何渲染刷新）；--purge 连带按绑定清单逐一删除各
+        文档中的块，返回实际清理的文档数。
+
+        purge 原子拒绝：删前对全清单做前置校验——文档须在磁盘上存在、该
+        id 的块须恰好一个（缺失或多个即报错并指明文档路径与现状），全部
+        通过才开始删，不产生半删状态。只删标记行与块内内容（含包裹围栏
+        与插入时补的保障空行，拼接点不产生双空行粘连），块外一字不动。
+        一次变更 = 一步撤销历史（purge 快照全部绑定文档全文，undo 连同
+        配置与块一并恢复）。
+        """
+        data = self.load()
+        views = data.get("views", {})
+        if view_id not in views:
+            raise ToolError(f"视图不存在: {view_id}")
+        docs_list = list(views[view_id].get("docs", []))
+        planned: dict[str, str] = {}
+        if purge:
+            begin, end = view_tree_markers(view_id)
+            for doc_rel in docs_list:  # 前置校验 + 变换计划：全部通过才动手
+                text = self._read_doc(doc_rel)
+                if text is None:
+                    raise ToolError(
+                        f"文档不存在: {doc_rel}（purge 删块需要文档在磁盘上存在；"
+                        f"文档已被删除时其中的块已不在，可改用 view-rm 不带 --purge 仅删配置）"
+                    )
+                n_blocks = text.split("\n").count(begin)
+                if n_blocks == 0:
+                    raise ToolError(f"文档 {doc_rel} 缺视图 {view_id} 标记块（purge 按清单逐一删块，缺失即拒绝）: {begin}")
+                if n_blocks > 1:
+                    raise ToolError(
+                        f"文档 {doc_rel} 存在 {n_blocks} 个视图 {view_id} 标记块"
+                        f"（恰好 1 个才可 purge），请手改删除多余块后重试: {begin}"
+                    )
+                planned[doc_rel] = remove_view_block(text, begin, end)  # dry-run：孤立标记在此暴露
+        remaining = {k: v for k, v in views.items() if k != view_id}
+        candidate = dict(data)
+        if remaining:
+            candidate["views"] = remaining
+        else:
+            candidate.pop("views", None)  # 空 views 不落盘：回到无配置仓库形态
+        self._record_undo(
+            f"view-rm {view_id} --purge" if purge else f"view-rm {view_id}",
+            docs=self._current_docs_snapshot(docs_list) if purge else None,
+        )
+        self.write_data(candidate)
+        for doc_rel, new_text in planned.items():  # 数据写入在前、文档删除在后（对齐渲染管线次序）
+            self._write_doc(doc_rel, new_text)
+        return len(planned)
+
     def view_list(self) -> list[dict]:
         """全部视图概要：id / 过滤器摘要 / 绑定文档清单与块存在情况（按 id 排序）。"""
         data = self.load()
@@ -1952,6 +2010,15 @@ def _cmd_view_doc(tool: TreeTool, args) -> None:
         print(f"已解绑（文档中的块保留为孤儿，不再刷新）: {args.view_id} -x- {args.rm}（一次变更，单步历史）")
 
 
+def _cmd_view_rm(tool: TreeTool, args) -> None:
+    n = tool.view_rm(args.view_id, purge=args.purge)
+    tool.render()
+    if args.purge:
+        print(f"已删除视图并清理 {n} 个绑定文档中的块: {args.view_id}（一次变更，单步历史）")
+    else:
+        print(f"已删除视图（各绑定文档中的块保留为孤儿，不再刷新）: {args.view_id}（一次变更，单步历史）")
+
+
 def _cmd_view_list(tool: TreeTool, args) -> None:
     views = tool.view_list()
     if not views:
@@ -2116,6 +2183,16 @@ def main(argv=None) -> int:
         help="围栏首行落点（仅与 --add 同用）：插在当前第 N 行内容之前（1-based，越界报错）；省略则块存在原地更新、缺失追加文档尾部；仅作用于本次绑定的文档",
     )
 
+    p = sub.add_parser(
+        "view-rm",
+        help="删除视图：默认仅删配置（绑定文档中的块保留为孤儿不再刷新）；--purge 连带删除各绑定文档中的块",
+    )
+    p.add_argument("view_id", help="既有视图 id")
+    p.add_argument(
+        "--purge", action="store_true",
+        help="按绑定清单逐一删除各文档中的块：删前校验每文档恰好一个（缺失或多个即报错原子拒绝），只删标记行与块内内容，块外一字不动",
+    )
+
     p = sub.add_parser("check", help="校验全部不变量")
     p.add_argument("--strict", action="store_true", help="告警也视为失败")
 
@@ -2152,6 +2229,7 @@ def main(argv=None) -> int:
         "tag-rm": _cmd_tag_rm,
         "view-add": _cmd_view_add,
         "view-doc": _cmd_view_doc,
+        "view-rm": _cmd_view_rm,
         "view-list": _cmd_view_list,
         "undo": _cmd_undo,
         "redo": _cmd_redo,
