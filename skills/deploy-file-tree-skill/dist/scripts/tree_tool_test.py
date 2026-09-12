@@ -29,6 +29,7 @@ from tree_tool import (  # noqa: E402
     _cmd_view_add,
     _cmd_view_doc,
     _cmd_view_list,
+    _cmd_view_rm,
     append_view_block,
     block_content,
     canonical_form,
@@ -2937,6 +2938,12 @@ class ViewBlockHelpersTest(unittest.TestCase):
         with self.assertRaises(ToolError):
             remove_view_block("nothing", self.begin, self.end)
 
+    def test_remove_view_block_collapses_blank_glue(self):
+        # 拼接点收敛：上方残留空行与下方保障空行相接时去其一，删除动作自身不产生双空行粘连
+        text = "a\n\n\n```\n" + self.begin + "\nc\n" + self.end + "\n```\n\nb"
+        out = remove_view_block(text, self.begin, self.end)
+        self.assertEqual(out, "a\n\nb")
+
 
 class ViewSilhouetteTest(ViewSandboxTest):
     """单锚点剪影渲染：骨架链只作容器、首行全局 root 名、hidden/collapsed 语义。"""
@@ -3411,6 +3418,217 @@ class ViewDocUndoTest(ViewSandboxTest):
         self.assertIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/b.md"))  # 块保留
 
 
+class ViewRmTest(ViewSandboxTest):
+    """view-rm 默认语义：仅删视图实体（配置消失），各绑定文档的块原样保留为孤儿。"""
+
+    def bind_two(self, tool: TreeTool) -> None:
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_doc("v", add="docs/b.md")
+
+    def test_view_rm_removes_config_keeps_blocks(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        self.bind_two(tool)
+        tool.view_rm("v")
+        self.assertNotIn("views", tool.load())  # 视图实体消失（唯一视图删除后 views 键省略）
+        begin, _end = view_tree_markers("v")
+        self.assertIn(begin, self.doc_text(tool, "docs/a.md"))  # 各文档的块原样保留
+        self.assertIn(begin, self.doc_text(tool, "docs/b.md"))
+
+    def test_kept_blocks_no_longer_refreshed(self):
+        # 孤儿块此后不再被任何渲染刷新：数据变更不触碰保留的块
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        self.bind_two(tool)
+        tool.view_rm("v")
+        import types
+
+        args = types.SimpleNamespace(
+            path="apps/new.tsx", desc="新增", detail=None, rel=None, tags=None,
+            dir=False, collapsed=None, hidden=None, git_ignore=None,
+        )
+        _cmd_add(tool, args)  # CLI 层数据命令：写后自动渲染（v 已不在配置中）
+        self.assertNotIn("new.tsx", self.doc_text(tool, "docs/a.md"))
+        self.assertNotIn("new.tsx", self.doc_text(tool, "docs/b.md"))
+
+    def test_view_rm_keeps_other_views_and_their_blocks(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("w", under="apps/ui", doc="docs/b.md")
+        tool.view_rm("v")
+        self.assertEqual(list(tool.load()["views"]), ["w"])
+        self.assertIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/a.md"))  # v 的块保留
+        self.assertIn(view_tree_markers("w")[0], self.doc_text(tool, "docs/b.md"))  # w 照常绑定
+
+    def test_rejects_unknown_view(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        with self.assertRaises(ToolError) as ctx:
+            tool.view_rm("ghost")
+        self.assertIn("ghost", str(ctx.exception))
+        undo_ops, _ = tool.history_summary()
+        self.assertEqual(undo_ops, [])  # 无半截历史
+
+    def test_config_only_view_purge_noop(self):
+        # 配置先行（无绑定文档）的视图：purge 无块可删，仅删配置
+        tool = self.make_view_tool()
+        tool.view_add("v", under="apps")
+        self.assertEqual(tool.view_rm("v", purge=True), 0)
+        self.assertNotIn("views", tool.load())
+
+    def test_view_list_no_longer_shows_removed_view(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("w", under="apps/ui")
+        tool.view_rm("v")
+        self.assertEqual([x["id"] for x in tool.view_list()], ["w"])
+
+
+class ViewRmPurgeTest(ViewSandboxTest):
+    """view-rm --purge：按绑定清单逐一删块，前置校验恰好一个（原子拒绝），块外一字不动。"""
+
+    def bind_two(self, tool: TreeTool) -> None:
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_doc("v", add="docs/b.md")
+
+    def test_purge_removes_blocks_in_all_bound_docs(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        self.bind_two(tool)
+        n = tool.view_rm("v", purge=True)
+        self.assertEqual(n, 2)  # 返回实际清理的文档块数
+        self.assertNotIn("views", tool.load())
+        begin, _end = view_tree_markers("v")
+        self.assertNotIn(begin, self.doc_text(tool, "docs/a.md"))
+        self.assertNotIn(begin, self.doc_text(tool, "docs/b.md"))
+
+    def test_purge_restores_append_tail_document(self):
+        # 块追加到尾部（无 --line）：删除后文档还原为插入前形态
+        original = "# 扩展说明\n\n前言段落。\n"
+        tool = self.make_view_tool(docs={"docs/ext.md": original})
+        tool.view_add("v", under="apps", doc="docs/ext.md")
+        tool.view_rm("v", purge=True)
+        self.assertEqual(self.doc_text(tool, "docs/ext.md"), original)
+
+    def test_purge_restores_mid_document_no_blank_glue(self):
+        # 块按行插在文档中部（上下段落间）：删除后段落结构还原，无空行粘连
+        original = "# 标题\n\n上段落。\n\n下段落。\n"
+        tool = self.make_view_tool(docs={"docs/a.md": original})
+        tool.view_add("v", under="apps", doc="docs/a.md", line=4)
+        begin, _end = view_tree_markers("v")
+        self.assertIn(begin, self.doc_text(tool, "docs/a.md"))
+        tool.view_rm("v", purge=True)
+        self.assertEqual(self.doc_text(tool, "docs/a.md"), original)
+
+    def test_purge_atomic_rejection_on_missing_block(self):
+        # 某文档块缺失：报错指明文档与现状，不产生半删状态（配置与另一文档的块原样）
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        self.bind_two(tool)
+        self.write_doc(tool, "docs/b.md", "# B\n")  # b 的块被手删
+        with self.assertRaises(ToolError) as ctx:
+            tool.view_rm("v", purge=True)
+        msg = str(ctx.exception)
+        self.assertIn("docs/b.md", msg)
+        self.assertIn("缺", msg)
+        self.assertIn("views", tool.load())  # 配置保留
+        begin, _end = view_tree_markers("v")
+        self.assertIn(begin, self.doc_text(tool, "docs/a.md"))  # a 的块未被动
+        undo_ops, _ = tool.history_summary()
+        self.assertEqual(len(undo_ops), 2)  # 无半截历史（view-add + view-doc 两步）
+
+    def test_purge_atomic_rejection_on_multiple_blocks(self):
+        # 某文档同 id 多块（病态）：报错指明文档与块数，原子拒绝
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        self.bind_two(tool)
+        text = self.doc_text(tool, "docs/b.md")
+        begin, end = view_tree_markers("v")
+        lines = text.split("\n")
+        block = lines[lines.index(begin) - 1 : lines.index(end) + 2]
+        self.write_doc(tool, "docs/b.md", text.rstrip("\n") + "\n\n" + "\n".join(block) + "\n")
+        with self.assertRaises(ToolError) as ctx:
+            tool.view_rm("v", purge=True)
+        msg = str(ctx.exception)
+        self.assertIn("docs/b.md", msg)
+        self.assertIn("2", msg)
+        self.assertIn("views", tool.load())
+        self.assertEqual(self.doc_text(tool, "docs/a.md").count(begin), 1)  # a 未被动
+
+    def test_purge_rejects_missing_doc(self):
+        # 绑定文档在磁盘上不存在：可理解报错（与 view-doc --rm 对齐），不落盘
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        self.bind_two(tool)
+        (tool.repo_root / "docs" / "b.md").unlink()
+        with self.assertRaises(ToolError) as ctx:
+            tool.view_rm("v", purge=True)
+        msg = str(ctx.exception)
+        self.assertIn("docs/b.md", msg)
+        self.assertIn("不存在", msg)
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md", "docs/b.md"])  # 配置不动
+
+
+class ViewRmUndoTest(ViewSandboxTest):
+    """view-rm 撤销回滚：单步历史；undo/redo 把配置变更与全部绑定文档的块一并恢复。"""
+
+    def bind_two(self, tool: TreeTool) -> None:
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_doc("v", add="docs/b.md")
+
+    def test_view_rm_single_history_step(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_rm("v")
+        undo_ops, redo_ops = tool.history_summary()
+        self.assertEqual((len(undo_ops), redo_ops), (2, []))
+        self.assertIn("view-rm", undo_ops[-1])
+
+    def test_undo_view_rm_reactivates_blocks(self):
+        # 撤销默认删除：配置恢复，保留的孤儿块重新入渲染（漂移被纠正）
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_rm("v")
+        begin, end = view_tree_markers("v")
+        lines = self.doc_text(tool, "docs/a.md").split("\n")
+        lines.insert(lines.index(end), "孤儿期间手改漂移")
+        self.write_doc(tool, "docs/a.md", "\n".join(lines))
+        op = tool.undo()
+        self.assertIn("view-rm", op)
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md"])  # 配置恢复
+        text = self.doc_text(tool, "docs/a.md")
+        self.assertNotIn("孤儿期间手改漂移", text)  # 块重新激活并刷新
+        self.assertIn("main.tsx", block_content(text, begin, end))
+
+    def test_undo_view_rm_purge_restores_config_and_all_docs(self):
+        # 撤销 purge：配置与全部绑定文档的块渲染产物一并恢复到操作前
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n\nA 段落。\n", "docs/b.md": "# B\n\nB 段落。\n"})
+        self.bind_two(tool)
+        before_a = self.doc_text(tool, "docs/a.md")
+        before_b = self.doc_text(tool, "docs/b.md")
+        tool.view_rm("v", purge=True)
+        self.assertNotIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/a.md"))
+        tool.undo()
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md", "docs/b.md"])
+        self.assertEqual(self.doc_text(tool, "docs/a.md"), before_a)  # 全文恢复（含块）
+        self.assertEqual(self.doc_text(tool, "docs/b.md"), before_b)
+
+    def test_redo_view_rm_purge_removals_all_docs(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        self.bind_two(tool)
+        tool.view_rm("v", purge=True)
+        purged_a = self.doc_text(tool, "docs/a.md")
+        purged_b = self.doc_text(tool, "docs/b.md")
+        tool.undo()
+        tool.redo()
+        self.assertNotIn("views", tool.load())
+        self.assertEqual(self.doc_text(tool, "docs/a.md"), purged_a)  # 删块后的形态回放
+        self.assertEqual(self.doc_text(tool, "docs/b.md"), purged_b)
+
+    def test_redo_view_rm_keeps_blocks(self):
+        # 重做默认删除：配置再次消失，保留的块仍在
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_rm("v")
+        tool.undo()
+        tool.redo()
+        self.assertNotIn("views", tool.load())
+        self.assertIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/a.md"))
+
+
 class ViewListTest(ViewSandboxTest):
     """view-list：id / 过滤器摘要 / 绑定文档数 / 块存在情况。"""
 
@@ -3635,6 +3853,45 @@ class CmdViewDocTest(ViewSandboxTest):
         self.assertIn("docs/b.md", out)
         self.assertIn("保留", out)  # 提示块保留为孤儿
         self.assertIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/b.md"))
+
+
+class CmdViewRmTest(ViewSandboxTest):
+    """CLI 层 view-rm：参数接线与输出。"""
+
+    def test_cmd_view_rm_default_output(self):
+        import io
+        import types
+        from contextlib import redirect_stdout
+
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        args = types.SimpleNamespace(view_id="v", purge=False)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _cmd_view_rm(tool, args)
+        out = buf.getvalue()
+        self.assertIn("v", out)
+        self.assertIn("保留", out)  # 提示块保留为孤儿
+        self.assertIn("单步历史", out)
+        self.assertNotIn("views", tool.load())
+        self.assertIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/a.md"))
+
+    def test_cmd_view_rm_purge_output(self):
+        import io
+        import types
+        from contextlib import redirect_stdout
+
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_doc("v", add="docs/b.md")
+        args = types.SimpleNamespace(view_id="v", purge=True)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _cmd_view_rm(tool, args)
+        out = buf.getvalue()
+        self.assertIn("2", out)  # 清理了 2 个文档的块
+        self.assertNotIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/a.md"))
+        self.assertNotIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/b.md"))
 
 
 class SelfHostTest(unittest.TestCase):
