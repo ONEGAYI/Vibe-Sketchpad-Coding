@@ -1,6 +1,6 @@
 """file-tree 技能：项目文件树唯一维护入口。
 
-数据源 tree.json：顶层 {tags, tree}，tree 嵌套 = 目录嵌套（有 children 键即目录）。
+数据源 tree.json：顶层 {tags, tree, views}，tree 嵌套 = 目录嵌套（有 children 键即目录）。
 条目字段固定顺序 kind / desc / detail / rel / tags / collapsed / hidden / git-ignore / children；
 kind 由 children 判据推导（"file"/"dir"），规范化时无条件落盘供机器消费，
 不参与渲染、手改会被纠正；本脚本是唯一写入口，所有写命令执行后自动按
@@ -9,12 +9,16 @@ tree.json 持久化为紧凑 JSON（UTF-8 无 BOM、中文直存、无缩进、�
 末尾恰好一个 LF）；历史的两空格缩进排版仍是合法可检形态（check 照常通过），
 不需要迁移命令——下一次任意写操作落盘时自动转为紧凑格式，不占撤销历史步。
 
-渲染目标为 AGENTS.md 的两个标记块（简版树 / 标签词表）：
+渲染目标分两层：默认视图 = AGENTS.md 的两个标记块（简版树 / 标签词表），
 块内有标记则替换标记间内容；无标记则附加到文件尾部（带小节标题）；
-AGENTS.md 不存在则生成最小骨架。detail 完整描述只存于 tree.json 供查询，
-不渲染。渲染控制字段只影响 AGENTS.md 简版树：目录 collapsed=true 折叠
-（目录行带 … 不展开 children）；条目 hidden=true 整体隐藏（含子树）；
-两者默认 false（不落盘），数据、查询与 check 校验始终全量不受影响。
+AGENTS.md 不存在则生成最小骨架。子树视图 = tree.json 顶层 views 键登记的
+渲染配置（id + 过滤器 + 绑定文档清单），把数据的切片投影（剪影）渲染到各
+绑定文档的带 id 标记块（代码围栏包裹，仅树块无 tags 块）；骨架目录只作
+容器不显示简介，首行为全局 root 名，hidden 条目在任何视图不出现。
+detail 完整描述只存于 tree.json 供查询，不渲染。渲染控制字段只影响树渲染：
+目录 collapsed=true 折叠（目录行带 … 不展开 children）；条目 hidden=true
+整体隐藏（含子树）；两者默认 false（不落盘），数据、查询与 check 校验始终
+全量不受影响。
 校验控制字段 git-ignore=true 则豁免"必须被 git 跟踪"的对照（收录 .gitignore
 排除的本地文件，如大体积产物）：check 只校验磁盘存在，并要求确实排除在
 git 之外（未被跟踪且被 ignore 规则覆盖，二者违反其一均报错）。继承为就近
@@ -39,6 +43,8 @@ git 之外（未被跟踪且被 ignore 规则覆盖，二者违反其一均报�
                          [--git-ignore|--no-git-ignore] [--depth N]
   python tree_tool.py tag-add <名> -d 说明
   python tree_tool.py tag-rm <名>
+  python tree_tool.py view-add <id> --under <目录> [--doc <路径> [--line N]]
+  python tree_tool.py view-list
   python tree_tool.py undo | redo | history
   python tree_tool.py check [--strict]
   python tree_tool.py render
@@ -46,12 +52,14 @@ git 之外（未被跟踪且被 ignore 规则覆盖，二者违反其一均报�
 
 撤销历史（默认 20 步）存放于 git 私有区 <gitdir>/file-tree/history.json：
 不被 git 追踪、不入库、clone 不携带；非 git 仓库退化为技能目录 .history.json。
+视图命令进同一撤销栈：快照含数据与受影响文档全文，回滚连同渲染产物一并恢复。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -65,6 +73,14 @@ TREE_BEGIN = "<!-- file-tree:tree:begin 由脚本渲染，禁止手改 -->"
 TREE_END = "<!-- file-tree:tree:end -->"
 TAGS_BEGIN = "<!-- file-tree:tags:begin 由脚本渲染，禁止手改 -->"
 TAGS_END = "<!-- file-tree:tags:end -->"
+FENCE = "```"
+
+# 视图 id：小写字母/数字开头，允许连字符与下划线，总长 1-64；default 为默认视图保留字
+VIEW_ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+VIEW_ID_RESERVED = "default"
+# 过滤器表达式树的节点算子（spec 一期 schema 定稿；渲染消费当前仅实现单 under 锚点）
+FILTER_OPS = frozenset({"and", "or", "not", "under", "tag"})
+
 
 DESC_MAX = 20
 HISTORY_LIMIT = 20  # undo/redo 各自保留的最大步数
@@ -173,6 +189,73 @@ def _normalize_node(node: dict) -> dict:
     return ordered
 
 
+def _normalize_filter(expr) -> dict:
+    """校验并规范化过滤器表达式树节点（五种：and/or/not/under/tag）。
+
+    under 路径归一为正斜杠形式；不做跨数据校验（路径在树中、标签已登记）——
+    那是创建入口（view-add）的职责，数据层只锁结构。
+    """
+    if not isinstance(expr, dict):
+        raise ToolError(f"过滤器节点必须是对象: {expr!r}")
+    op = expr.get("op")
+    if not isinstance(op, str) or op not in FILTER_OPS:
+        raise ToolError(f"过滤器节点 op 非法（须为 {sorted(FILTER_OPS)}）: {expr!r}")
+    unknown = [k for k in expr if k not in ("op", "path", "tag", "children", "child")]
+    if unknown:
+        raise ToolError(f"过滤器节点含未知字段 {unknown}: {expr!r}")
+    if op == "under":
+        if not isinstance(expr.get("path"), str):
+            raise ToolError(f"under 节点缺 path 字符串: {expr!r}")
+        return {"op": "under", "path": "/".join(split_rel_path(expr["path"]))}
+    if op == "tag":
+        if not isinstance(expr.get("tag"), str) or not expr["tag"]:
+            raise ToolError(f"tag 节点缺非空 tag 字符串: {expr!r}")
+        return {"op": "tag", "tag": expr["tag"]}
+    if op in ("and", "or"):
+        children = expr.get("children")
+        if not isinstance(children, list) or not children:
+            raise ToolError(f"{op} 节点须为非空 children 数组: {expr!r}")
+        return {"op": op, "children": [_normalize_filter(c) for c in children]}
+    # not
+    if not isinstance(expr.get("child"), dict):
+        raise ToolError(f"not 节点缺 child 对象: {expr!r}")
+    return {"op": "not", "child": _normalize_filter(expr["child"])}
+
+
+def _normalize_views(views) -> dict:
+    """校验并规范化 views：id 排序、实体字段定稿（filter + docs）、空集剔除。
+
+    render_overrides 是二期键（schema 已定稿）：一期遇到即报错注明二期功能，
+    防止用户误以为覆盖已生效。空 docs 省略键（配置先行的视图合法）。
+    """
+    if not isinstance(views, dict):
+        raise ToolError(f"views 必须是对象: {views!r}")
+    out: dict = {}
+    for view_id, spec in sorted(views.items(), key=lambda kv: sort_key(kv[0])):
+        if view_id == VIEW_ID_RESERVED:
+            raise ToolError("视图 id 'default' 是默认视图保留字，不可登记")
+        if not isinstance(view_id, str) or not VIEW_ID_RE.fullmatch(view_id):
+            raise ToolError(f"视图 id 语法非法（[a-z0-9][a-z0-9_-]{{0,63}}，禁保留字 default）: {view_id!r}")
+        if not isinstance(spec, dict):
+            raise ToolError(f"视图 {view_id} 配置必须是对象: {spec!r}")
+        if "render_overrides" in spec:
+            raise ToolError(f"视图 {view_id} 的 render_overrides 是二期功能，当前版本不支持")
+        unknown = [k for k in spec if k not in ("filter", "docs")]
+        if unknown:
+            raise ToolError(f"视图 {view_id} 配置含未知字段 {unknown}")
+        if "filter" not in spec:
+            raise ToolError(f"视图 {view_id} 缺 filter")
+        docs = spec.get("docs", [])
+        if not isinstance(docs, list) or not all(isinstance(d, str) for d in docs):
+            raise ToolError(f"视图 {view_id} 的 docs 必须是字符串数组")
+        entity = {"filter": _normalize_filter(spec["filter"])}
+        cleaned_docs = sorted({"/".join(split_rel_path(d)) for d in docs}, key=sort_key)
+        if cleaned_docs:
+            entity["docs"] = cleaned_docs
+        out[view_id] = entity
+    return out
+
+
 def normalize_data(data: dict) -> dict:
     if not isinstance(data, dict):
         raise ToolError("数据顶层不是对象")
@@ -196,6 +279,11 @@ def normalize_data(data: dict) -> dict:
         for name, child in sorted(tree.items(), key=lambda kv: sort_key(kv[0]))
     }
     for key in sorted((k for k in data if k not in ("tags", "tree", "root")), key=sort_key):
+        if key == "views":
+            views = _normalize_views(data[key])  # 结构化键：校验 + 规范化，非透传
+            if views:
+                out["views"] = views
+            continue
         out[key] = data[key]
     return out
 
@@ -256,6 +344,67 @@ def block_content(text: str, begin: str, end: str) -> str:
     return "\n".join(lines[b + 1 : e])
 
 
+def view_tree_markers(view_id: str) -> tuple[str, str]:
+    """视图子树标记块起止行（整行精确匹配，与默认块同款注释文案）。"""
+    return (
+        f"<!-- file-tree:tree^id={view_id}:begin 由脚本渲染，禁止手改 -->",
+        f"<!-- file-tree:tree^id={view_id}:end -->",
+    )
+
+
+def fenced_block_lines(begin: str, end: str, content: str) -> list[str]:
+    """代码围栏包裹的标记块行序列（与默认简版树块同款形态）。"""
+    return [FENCE, begin, *content.split("\n"), end, FENCE]
+
+
+def append_view_block(text: str, begin: str, end: str, content: str) -> str:
+    """把视图块追加到文档尾部：块外上方至少一行空行，末尾恰好一个 LF。"""
+    block = "\n".join(fenced_block_lines(begin, end, content))
+    return text.rstrip("\n") + "\n\n" + block + "\n"
+
+
+def insert_block_at_line(text: str, begin: str, end: str, content: str, line: int) -> str:
+    """把围栏首行落到第 N 行（1-based 承诺落点），越界报错拒绝而非钳制。
+
+    上方空行保证：原第 N-1 行已是空行 → 插在当前第 N 行内容之前（fence 落 N）；
+    非空 → 插入序列带前导空行、整体插在当前第 N-1 行内容之前（空行占第 N-1 行、
+    fence 仍落 N、原第 N-1 行内容后移）。文档头（N=1）无上方约束。
+    下方空行保证：块后首行非空则补一个空行。
+    """
+    lines = text.split("\n")
+    if not isinstance(line, int) or isinstance(line, bool) or not (1 <= line <= len(lines)):
+        raise ToolError(f"--line {line!r} 越界（文档共 {len(lines)} 行，1-based，须落在 1..{len(lines)}）")
+    prefix_lines: list[str] = []
+    start = line  # 插入点：插在当前第 start 行内容之前（1-based）
+    if line > 1 and lines[line - 2] != "":
+        prefix_lines = [""]
+        start = line - 1  # 前导空行占第 N-1 行，插入点随之上移一行
+    before, after = lines[: start - 1], lines[start - 1 :]
+    if after and after[0] != "":
+        after = [""] + after
+    return "\n".join(before + prefix_lines + fenced_block_lines(begin, end, content) + after)
+
+
+def remove_view_block(text: str, begin: str, end: str) -> str:
+    """删除标记块（整行精确匹配），连带包裹围栏与紧邻上方的一个空行。
+
+    上下空行是插入时补的保障行：删除块时连同上方那一行一并移除最接近
+    还原插入前形态；围栏不存在（被手改破坏）时退化为只删 begin..end。
+    """
+    lines = text.split("\n")
+    try:
+        b, e = lines.index(begin), lines.index(end)
+    except ValueError as exc:
+        raise ToolError(f"缺标记块 {begin} / {end}（文件被改坏？）") from exc
+    if e <= b:
+        raise ToolError(f"标记块顺序错误: {begin} 在 {end} 之后")
+    start = b - 1 if b > 0 and lines[b - 1] == FENCE else b
+    stop = e + 2 if e + 1 < len(lines) and lines[e + 1] == FENCE else e + 1
+    if start > 0 and lines[start - 1] == "":
+        start -= 1
+    return "\n".join(lines[:start] + lines[stop:])
+
+
 def is_dir(node: dict) -> bool:
     return "children" in node
 
@@ -269,41 +418,66 @@ def walk_entries(children: dict, prefix: list[str]):
             yield from walk_entries(node["children"], prefix + [name])
 
 
+def render_children_lines(children: dict, prefix: str) -> list[str]:
+    """渲染目录子级块（简版树与剪影共用）：hidden 跳过、collapsed 折叠、按最宽 stem 对齐。"""
+
+    items = [
+        (name, node)
+        for name, node in sorted(children.items(), key=lambda kv: sort_key(kv[0]))
+        if not node.get("hidden")
+    ]
+    if not items:
+        return []
+    stems = []
+    for i, (name, node) in enumerate(items):
+        connector = "└── " if i == len(items) - 1 else "├── "
+        suffix = "/" if is_dir(node) else ""
+        if suffix and node.get("collapsed") and node["children"]:
+            suffix = "/…"
+        stems.append(prefix + connector + name + suffix)
+    column = max(len(s) for s in stems) + 1  # '#' 所在列
+    lines = []
+    for i, ((name, node), stem) in enumerate(zip(items, stems)):
+        cont_prefix = prefix + ("    " if i == len(items) - 1 else "│   ")
+        if node.get("desc"):
+            lines.append(stem + " " * (column - len(stem)) + "# " + node["desc"])
+        else:
+            lines.append(stem)
+        if is_dir(node) and node["children"] and not node.get("collapsed"):
+            lines.extend(render_children_lines(node["children"], cont_prefix))
+    return lines
+
+
 def render_tree(root_name: str, tree: dict) -> str:
     """渲染简版树：注释为 desc 单行；hidden 条目整体跳过，collapsed 目录带 … 折叠。
 
     列对齐：每个父目录的 children 块内按最宽 stem 对齐，'#' 固定在 width+1 列。
     """
-
-    def render_children(children: dict, prefix: str) -> list[str]:
-        items = [
-            (name, node)
-            for name, node in sorted(children.items(), key=lambda kv: sort_key(kv[0]))
-            if not node.get("hidden")
-        ]
-        if not items:
-            return []
-        stems = []
-        for i, (name, node) in enumerate(items):
-            connector = "└── " if i == len(items) - 1 else "├── "
-            suffix = "/" if is_dir(node) else ""
-            if suffix and node.get("collapsed") and node["children"]:
-                suffix = "/…"
-            stems.append(prefix + connector + name + suffix)
-        column = max(len(s) for s in stems) + 1  # '#' 所在列
-        lines = []
-        for i, ((name, node), stem) in enumerate(zip(items, stems)):
-            cont_prefix = prefix + ("    " if i == len(items) - 1 else "│   ")
-            if node.get("desc"):
-                lines.append(stem + " " * (column - len(stem)) + "# " + node["desc"])
-            else:
-                lines.append(stem)
-            if is_dir(node) and node["children"] and not node.get("collapsed"):
-                lines.extend(render_children(node["children"], cont_prefix))
-        return lines
-
     lines = [root_name + "/"]
-    lines.extend(render_children(tree, ""))
+    lines.extend(render_children_lines(tree, ""))
+    return "\n".join(lines)
+
+
+def render_silhouette(root_name: str, tree: dict, under_parts: list[str]) -> str:
+    """渲染单锚点剪影：根到锚点的目录链只作容器（不显示简介），锚点子树正常渲染。
+
+    首行为全局 root 名；hidden 条目在任何视图不出现——锚点链上任一节点
+    hidden 时整个视图只剩 root 行（隐藏语义覆盖子树）。
+    """
+    lines = [root_name + "/"]
+    prefix = ""
+    cursor: dict = {"children": tree}
+    for part in under_parts:
+        child = cursor["children"].get(part)
+        if child is None:  # 调用方已校验锚点存在；防御数据竞态
+            break
+        if child.get("hidden"):
+            return root_name + "/"
+        lines.append(prefix + "└── " + part + "/")
+        prefix += "    "
+        cursor = child
+    if is_dir(cursor):
+        lines.extend(render_children_lines(cursor["children"], prefix))
     return "\n".join(lines)
 
 
@@ -409,10 +583,18 @@ class TreeTool:
     def _trim(self, stack: list) -> list:
         return stack[-self.history_limit :] if len(stack) > self.history_limit else stack
 
-    def _record_undo(self, op: str) -> None:
-        """数据变更前调用：快照当前态入 undo 栈，截断 redo 分支。历史写入失败仅告警不阻断。"""
+    def _record_undo(self, op: str, docs: dict[str, str] | None = None) -> None:
+        """数据变更前调用：快照当前态入 undo 栈，截断 redo 分支。历史写入失败仅告警不阻断。
+
+        docs 为受影响渲染文档的变更前全文快照（仓库相对路径 → 内容）：仅产物
+        无法由数据纯函数重推导的命令需要（如 view-add 的块插入位置/删除）；
+        块内容类产物可由 render 重算，不需要快照。
+        """
         hist = self._load_history()
-        hist["undo"].append({"op": op, "data": self.load()})
+        entry: dict = {"op": op, "data": self.load()}
+        if docs:
+            entry["docs"] = docs
+        hist["undo"].append(entry)
         hist["undo"] = self._trim(hist["undo"])
         hist["redo"] = []
         try:
@@ -428,14 +610,39 @@ class TreeTool:
             [e.get("op", "?") for e in hist["redo"]],
         )
 
+    def _doc_path(self, rel: str) -> Path:
+        return self.repo_root.joinpath(*split_rel_path(rel))
+
+    def _read_doc(self, rel: str) -> str | None:
+        """读仓库内文档全文；不存在返回 None（快照与恢复方约定跳过）。"""
+        try:
+            return self._doc_path(rel).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+
+    def _write_doc(self, rel: str, text: str) -> None:
+        path = self._doc_path(rel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+
+    def _current_docs_snapshot(self, rels) -> dict[str, str]:
+        """按文档清单采集当前全文快照（缺失文档跳过）。"""
+        return {rel: text for rel, text in ((r, self._read_doc(r)) for r in rels) if text is not None}
+
     def undo(self) -> str:
         hist = self._load_history()
         if not hist["undo"]:
             raise ToolError("没有可撤销的操作")
         entry = hist["undo"].pop()
-        hist["redo"].append({"op": entry["op"], "data": self.load()})
+        redo_entry: dict = {"op": entry["op"], "data": self.load()}
+        if "docs" in entry:  # 对向快照：操作后的文档现状，供 redo 完整回放（含块位置）
+            redo_entry["docs"] = self._current_docs_snapshot(entry["docs"])
+        hist["redo"].append(redo_entry)
         hist["redo"] = self._trim(hist["redo"])
         self.write_data(entry["data"])
+        for rel, text in entry.get("docs", {}).items():
+            self._write_doc(rel, text)  # 渲染产物一并恢复（render 幂等，不会再次改动）
         self.render()
         self._save_history(hist)
         return entry["op"]
@@ -445,9 +652,14 @@ class TreeTool:
         if not hist["redo"]:
             raise ToolError("没有可重做的操作")
         entry = hist["redo"].pop()
-        hist["undo"].append({"op": entry["op"], "data": self.load()})
+        undo_entry: dict = {"op": entry["op"], "data": self.load()}
+        if "docs" in entry:
+            undo_entry["docs"] = self._current_docs_snapshot(entry["docs"])
+        hist["undo"].append(undo_entry)
         hist["undo"] = self._trim(hist["undo"])
         self.write_data(entry["data"])
+        for rel, text in entry.get("docs", {}).items():
+            self._write_doc(rel, text)
         self.render()
         self._save_history(hist)
         return entry["op"]
@@ -938,7 +1150,8 @@ class TreeTool:
             (TAGS_BEGIN, TAGS_END, "## 文件树标签词表", False, self.render_tags_table),
         ]
 
-    def render(self) -> list[Path]:
+    def _render_default_view(self) -> list[Path]:
+        """渲染默认视图：AGENTS.md 的两个无 id 标记块（隐式视图，不占配置）。"""
         try:
             text = self.agents_md.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -963,6 +1176,156 @@ class TreeTool:
                 f.write(new_text)
             return [self.agents_md]
         return []
+
+    # ---------- 视图（多文档子树渲染） ----------
+
+    @staticmethod
+    def _filter_summary(filt: dict) -> str:
+        """过滤器表达式树的单行摘要（view-list 展示用）。"""
+        op = filt.get("op")
+        if op == "under":
+            return f"under {filt['path']}"
+        if op == "tag":
+            return f"tag {filt['tag']}"
+        if op in ("and", "or"):
+            return f"{op}(" + ", ".join(TreeTool._filter_summary(c) for c in filt["children"]) + ")"
+        if op == "not":
+            return f"not({TreeTool._filter_summary(filt['child'])})"
+        return repr(filt)
+
+    def _view_renderable(self, view_id: str, spec: dict, data: dict) -> tuple[str, list[str]] | None:
+        """返回 (剪影内容, 锚点段)；不可渲染（锚点悬空/过滤器超范围/锚点非目录）时
+        打印告警并返回 None——渲染管线跳过该视图而非整体失败，坏配置留给
+        view-list 呈现与后续 check 诊断。
+        """
+        filt = spec.get("filter", {})
+        if filt.get("op") != "under":
+            print(f"警告: 视图 {view_id} 过滤器非单 under 锚点，跳过渲染（当前版本渲染仅支持单锚点）", file=sys.stderr)
+            return None
+        parts = split_rel_path(filt["path"])
+        anchor = find_node(data["tree"], parts)
+        if anchor is None or not is_dir(anchor):
+            print(f"警告: 视图 {view_id} 锚点不在树中或非目录: {filt['path']}，跳过渲染", file=sys.stderr)
+            return None
+        name, _custom = self.current_root_name()
+        return render_silhouette(name, data["tree"], parts), parts
+
+    @staticmethod
+    def _plan_view_block(text: str, begin: str, end: str, content: str, target_line: int | None) -> str:
+        """单文档的块放置计划（纯函数）：已存在块原地替换或按行重定位，缺失则插入/追加。
+
+        重定位（target_line 给定且块已存在）：先删除旧块（含围栏与紧邻空行），
+        行号以删除后的文档为基准；dry-run 调用即校验（越界/孤立标记在此抛错）。
+        """
+        if begin in text:
+            if target_line is not None:
+                return insert_block_at_line(
+                    remove_view_block(text, begin, end), begin, end, content, target_line
+                )
+            return replace_block(text, begin, end, content)
+        if end in text:
+            raise ToolError(f"存在孤立结束标记（文件被改坏？）: {end}")
+        if target_line is not None:
+            return insert_block_at_line(text, begin, end, content, target_line)
+        return append_view_block(text, begin, end, content)
+
+    def _render_view(self, view_id: str, spec: dict, data: dict, target_line: int | None = None) -> list[Path]:
+        """把视图剪影渲染到全部绑定文档。
+
+        块已存在且 target_line 给定 → 重定位（删除后按行插入；行号以删除旧块后
+        的文档为基准）；块已存在无 target_line → 原地替换内容；块不存在 →
+        按 target_line 插入或追加尾部。绑定文档缺失时跳过（不凭空创建）。
+        """
+        made = self._view_renderable(view_id, spec, data)
+        if made is None:
+            return []
+        content, _parts = made
+        begin, end = view_tree_markers(view_id)
+        updated: list[Path] = []
+        for doc_rel in spec.get("docs", []):
+            path = self._doc_path(doc_rel)
+            try:
+                text = path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                print(f"警告: 视图 {view_id} 绑定文档不存在，跳过: {doc_rel}", file=sys.stderr)
+                continue
+            new_text = self._plan_view_block(text, begin, end, content, target_line)
+            if new_text != text:
+                with path.open("w", encoding="utf-8", newline="\n") as f:
+                    f.write(new_text)
+                updated.append(path)
+        return updated
+
+    def render(self) -> list[Path]:
+        updated: list[Path] = list(self._render_default_view())
+        data = self.load()
+        for view_id, spec in sorted(data.get("views", {}).items(), key=lambda kv: sort_key(kv[0])):
+            updated += self._render_view(view_id, spec, data)
+        return updated
+
+    def view_add(self, view_id: str, under: str, doc: str | None = None, line: int | None = None) -> None:
+        """登记/更新视图（单目录锚点）：落盘配置 + 渲染绑定文档。
+
+        同 id 重复执行 = upsert：过滤器与绑定文档清单替换为本次参数；块已存在
+        时默认原地更新，--line 给定时重定位。一次变更 = 一步撤销历史（快照含
+        受影响文档全文，undo/redo 连同块位置一并恢复）。
+        """
+        if line is not None and doc is None:
+            raise ToolError("--line 须与 --doc 同用（行号是绑定文档内的落位参数）")
+        if not isinstance(view_id, str) or not VIEW_ID_RE.fullmatch(view_id):
+            raise ToolError(f"视图 id 语法非法（[a-z0-9][a-z0-9_-]{{0,63}}）: {view_id!r}")
+        if view_id == VIEW_ID_RESERVED:
+            raise ToolError("视图 id 'default' 是默认视图保留字，不可登记")
+        data = self.load()
+        under_parts = split_rel_path(under)
+        anchor = find_node(data["tree"], under_parts)
+        if anchor is None or not is_dir(anchor):
+            raise ToolError(f"--under 不是树中目录条目: {under}")
+        docs_list: list[str] = []
+        if doc is not None:
+            doc_rel = "/".join(split_rel_path(doc))
+            if not self._doc_path(doc_rel).is_file():
+                raise ToolError(f"绑定文档不存在（先创建文档再登记视图）: {doc_rel}")
+            docs_list = [doc_rel]
+        candidate = dict(data)
+        views = {k: dict(v) for k, v in data.get("views", {}).items()}
+        views[view_id] = {"filter": {"op": "under", "path": "/".join(under_parts)}}
+        if docs_list:
+            views[view_id]["docs"] = docs_list
+        candidate["views"] = views
+        normalize_data(candidate)  # 写前预检（render_overrides 等手改在此拦截，拒绝不留半截历史）
+        if docs_list:  # 渲染计划 dry-run：行号越界/孤立标记等在落盘前暴露，拒绝保持原子
+            made = self._view_renderable(view_id, views[view_id], data)
+            if made is not None:
+                content, _parts = made
+                begin, end = view_tree_markers(view_id)
+                for doc_rel in docs_list:
+                    text = self._read_doc(doc_rel)
+                    if text is not None:
+                        self._plan_view_block(text, begin, end, content, line)
+        self._record_undo(
+            f"view-add {view_id}",
+            docs={doc_rel: self._read_doc(doc_rel)} if docs_list else None,
+        )
+        self.write_data(candidate)
+        self._render_view(view_id, self.load()["views"][view_id], self.load(), target_line=line)
+
+    def view_list(self) -> list[dict]:
+        """全部视图概要：id / 过滤器摘要 / 绑定文档清单与块存在情况（按 id 排序）。"""
+        data = self.load()
+        result: list[dict] = []
+        for view_id, spec in sorted(data.get("views", {}).items(), key=lambda kv: sort_key(kv[0])):
+            begin, _end = view_tree_markers(view_id)
+            docs = []
+            for rel in spec.get("docs", []):
+                text = self._read_doc(rel)
+                docs.append({"doc": rel, "block": text is not None and begin in text})
+            result.append({
+                "id": view_id,
+                "filter": self._filter_summary(spec.get("filter", {})),
+                "docs": docs,
+            })
+        return result
 
     # ---------- check ----------
 
@@ -1325,6 +1688,27 @@ def _cmd_tag_rm(tool: TreeTool, args) -> None:
     print(f"已删除标签并重渲染: {args.name}")
 
 
+def _cmd_view_add(tool: TreeTool, args) -> None:
+    tool.view_add(args.view_id, under=args.under, doc=args.doc, line=args.line)
+    target = f" -> {args.doc}" + (f"（围栏首行第 {args.line} 行）" if args.line else "") if args.doc else ""
+    print(f"已登记视图并渲染: {args.view_id}{target}（一次变更，单步历史）")
+
+
+def _cmd_view_list(tool: TreeTool, args) -> None:
+    views = tool.view_list()
+    if not views:
+        print("无视图（仅默认视图：不带 id 的标记块渲染于 AGENTS.md）")
+        return
+    print(f"共 {len(views)} 个视图：")
+    for v in views:
+        print(f"- {v['id']}")
+        print(f"    过滤器: {v['filter']}")
+        print(f"    绑定文档: {len(v['docs'])}")
+        for d in v["docs"]:
+            state = "块存在" if d["block"] else "块缺失"
+            print(f"      {d['doc']} [{state}]")
+
+
 def _cmd_undo(tool: TreeTool, args) -> None:
     op = tool.undo()
     print(f"已撤销: {op}（redo 可重做）")
@@ -1444,6 +1828,14 @@ def main(argv=None) -> int:
     p = sub.add_parser("tag-rm", help="删除受控标签（被使用时拒绝）")
     p.add_argument("name")
 
+    p = sub.add_parser("view-add", help="登记/更新视图（单目录锚点）：把子树剪影渲染到绑定文档的带 id 标记块")
+    p.add_argument("view_id", help="视图 id：[a-z0-9][a-z0-9_-]{0,63}，保留字 default 不可用")
+    p.add_argument("--under", required=True, help="目录锚点（树中已存在的目录条目）")
+    p.add_argument("--doc", help="绑定文档（仓库相对路径，需已存在；缺省仅落盘配置不渲染）")
+    p.add_argument("--line", type=int, help="围栏首行落点：插在当前第 N 行内容之前（1-based，越界报错）；省略则块存在原地更新、缺失追加文档尾部；同 id 已有块时重定位以删除旧块后的行号为准")
+
+    sub.add_parser("view-list", help="列出全部视图概要（id / 过滤器摘要 / 绑定文档数 / 块存在情况）")
+
     p = sub.add_parser("check", help="校验全部不变量")
     p.add_argument("--strict", action="store_true", help="告警也视为失败")
 
@@ -1478,6 +1870,8 @@ def main(argv=None) -> int:
         "mark": _cmd_mark,
         "tag-add": _cmd_tag_add,
         "tag-rm": _cmd_tag_rm,
+        "view-add": _cmd_view_add,
+        "view-list": _cmd_view_list,
         "undo": _cmd_undo,
         "redo": _cmd_redo,
         "history": _cmd_history,
