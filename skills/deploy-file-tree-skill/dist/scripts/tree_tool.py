@@ -12,21 +12,29 @@ tree.json 持久化为紧凑 JSON（UTF-8 无 BOM、中文直存、无缩进、�
 渲染目标分两层：默认视图 = AGENTS.md 的两个标记块（简版树 / 标签词表），
 块内有标记则替换标记间内容；无标记则附加到文件尾部（带小节标题）；
 AGENTS.md 不存在则生成最小骨架。子树视图 = tree.json 顶层 views 键登记的
-渲染配置（id + 过滤器 + 绑定文档清单），把数据的切片投影（剪影）渲染到各
-绑定文档的带 id 标记块（代码围栏包裹，仅树块无 tags 块）。过滤器为五种
-节点（and/or/not/under/tag）的表达式树，在 tree.json 全量条目上求值（not
+渲染配置（id + 过滤器 + 渲染覆盖 + 绑定文档清单），把数据的切片投影（剪影）
+渲染到各绑定文档的带 id 标记块（代码围栏包裹，仅树块无 tags 块）。过滤器为
+五种节点（and/or/not/under/tag）的表达式树，在 tree.json 全量条目上求值（not
 为补集语义）；CLI 快捷参数编译为规范表达式树落盘（多锚点并集、锚点×标签
 交集、排除差集），完整布尔组合走 --filter 清单文件；引用（under 树中目录、
 tag 已登记标签）在 view-add 写盘前预检拒绝。剪影把选中集投回全树结构：选中
 条目正常渲染（简介照常、collapsed 生效），仅含选中后代的未选中祖先目录作
 路径骨架（只作容器不显示简介、不折叠），首行为全局 root 名，hidden 条目在
-任何视图不出现，空选中集渲染仅剩根名行。一个视图 id 可绑定一个或多个文档：
-全部绑定文档中的块内容完全相同（同一渲染产物镜像），任何数据变更后全部镜像
-同步刷新；绑定清单的增量增删走 view-doc（--rm 解绑默认保留块为孤儿，不再
-刷新）；视图删除走 view-rm（默认仅删配置保留块，--purge 连带按清单逐一
-删块：每文档删前校验恰好一个，原子拒绝半删状态）。同一文档内同 id 出现多
-于一个块属病态：相关命令（view-doc、view-add、触发渲染的数据命令）报错
-并指明文档路径与块数，不做猜测性修复。
+无覆盖的视图不出现，空选中集渲染仅剩根名行。视图级渲染覆盖（render_overrides）
+按路径索引改写该视图内的 hidden/collapsed 有效值——优先级：视图覆盖 > 条目
+全局字段 > 默认值，布尔双向（可反向覆盖：全局 hidden=true 在本视图显示、
+全局 collapsed=true 在本视图展开）；覆盖只影响渲染可见性，不改求值集合、不
+改条目字段、不影响其他视图与默认视图；hidden 为祖先优先剪枝语义（祖先有效
+hidden=true 时其后代覆盖不再查询），骨架目录的 collapsed 覆盖被忽略（强制
+展开不破例）；CLI 快捷参数 --collapse/--expand/--hide/--show 编译或 --overrides
+清单承载多覆盖项；引用预检（路径在树中、collapsed 指向目录）在 view-add 写盘
+前拒绝，rm 后悬空是合法中间态——渲染静默忽略、check 报错、不阻塞数据操作。
+一个视图 id 可绑定一个或多个文档：全部绑定文档中的块内容完全相同（同一渲染
+产物镜像），任何数据变更后全部镜像同步刷新；绑定清单的增量增删走 view-doc
+（--rm 解绑默认保留块为孤儿，不再刷新）；视图删除走 view-rm（默认仅删配置
+保留块，--purge 连带按清单逐一删块：每文档删前校验恰好一个，原子拒绝半删
+状态）。同一文档内同 id 出现多于一个块属病态：相关命令（view-doc、view-add、
+触发渲染的数据命令）报错并指明文档路径与块数，不做猜测性修复。
 check 对视图做两级诊断：错误 = 绑定文档缺块 / 同 id 多块 / 块内容与渲染
 产物漂移（消息附纠正出路）；告警 = 全仓库 .md 扫到未登记 id 的孤儿标记块
 （豁免技能目录与代码围栏内示意行；块自身包裹围栏不算豁免围栏）。
@@ -60,6 +68,8 @@ git 之外（未被跟踪且被 ignore 规则覆盖，二者违反其一均报�
   python tree_tool.py tag-rm <名>
   python tree_tool.py view-add <id> (--under <目录>)... [--tag <标签>]... [--exclude <目录>]...
                          [--filter <清单.json>] [--doc <路径> [--line N]]
+                         [--collapse <目录> | --expand <目录> | --hide <路径> | --show <路径>]...
+                         [--overrides <清单.json>]
   python tree_tool.py view-doc <id> (--add <路径> [--line N] | --rm <路径>)
   python tree_tool.py view-rm <id> [--purge]
   python tree_tool.py view-list
@@ -245,11 +255,37 @@ def _normalize_filter(expr) -> dict:
     return {"op": "not", "child": _normalize_filter(expr["child"])}
 
 
-def _normalize_views(views) -> dict:
-    """校验并规范化 views：id 排序、实体字段定稿（filter + docs）、空集剔除。
+def _normalize_overrides(overrides) -> dict:
+    """校验并规范化 render_overrides：路径归一排序、字段定序（collapsed/hidden）。
 
-    render_overrides 是二期键（schema 已定稿）：一期遇到即报错注明二期功能，
-    防止用户误以为覆盖已生效。空 docs 省略键（配置先行的视图合法）。
+    只锁结构（字段名、布尔类型），不做跨数据校验（路径在树中、collapsed 指向
+    目录）——那是 view-add 写盘预检与 check 的职责（T1 校验时机裁定）。
+    false 是语义值（双向覆盖），保留落盘；空对象项报错（无字段即无语义）；
+    整体空集剔除由调用方处理（与 docs 空省略键一致）。
+    """
+    if not isinstance(overrides, dict):
+        raise ToolError(f"render_overrides 必须是对象（路径 → 覆盖字段）: {overrides!r}")
+    out: dict = {}
+    for path, spec in sorted(overrides.items(), key=lambda kv: sort_key(kv[0])):
+        if not isinstance(spec, dict) or not spec:
+            raise ToolError(f"render_overrides['{path}'] 必须是非空对象（至少含 collapsed/hidden 一个字段）")
+        unknown = [k for k in spec if k not in ("collapsed", "hidden")]
+        if unknown:
+            raise ToolError(f"render_overrides['{path}'] 含未知字段 {unknown}（仅支持 collapsed/hidden）")
+        for field in ("collapsed", "hidden"):
+            if field in spec and not isinstance(spec[field], bool):
+                raise ToolError(f"render_overrides['{path}'] 的 {field} 必须是布尔值: {spec[field]!r}")
+        cleaned = {f: spec[f] for f in ("collapsed", "hidden") if f in spec}
+        out["/".join(split_rel_path(path))] = cleaned
+    return out
+
+
+def _normalize_views(views) -> dict:
+    """校验并规范化 views：id 排序、实体字段定稿（filter + docs + render_overrides）、空集剔除。
+
+    render_overrides 是视图级渲染覆盖（二期）：按路径索引改写该视图内条目的
+    hidden/collapsed 有效值（视图覆盖 > 条目全局字段 > 默认值，布尔双向）。
+    空 docs 省略键（配置先行的视图合法），空 render_overrides 同样省略键。
     """
     if not isinstance(views, dict):
         raise ToolError(f"views 必须是对象: {views!r}")
@@ -261,9 +297,7 @@ def _normalize_views(views) -> dict:
             raise ToolError(f"视图 id 语法非法（[a-z0-9][a-z0-9_-]{{0,63}}，禁保留字 default）: {view_id!r}")
         if not isinstance(spec, dict):
             raise ToolError(f"视图 {view_id} 配置必须是对象: {spec!r}")
-        if "render_overrides" in spec:
-            raise ToolError(f"视图 {view_id} 的 render_overrides 是二期功能，当前版本不支持")
-        unknown = [k for k in spec if k not in ("filter", "docs")]
+        unknown = [k for k in spec if k not in ("filter", "docs", "render_overrides")]
         if unknown:
             raise ToolError(f"视图 {view_id} 配置含未知字段 {unknown}")
         if "filter" not in spec:
@@ -275,6 +309,9 @@ def _normalize_views(views) -> dict:
         cleaned_docs = sorted({"/".join(split_rel_path(d)) for d in docs}, key=sort_key)
         if cleaned_docs:
             entity["docs"] = cleaned_docs
+        cleaned_overrides = _normalize_overrides(spec["render_overrides"]) if "render_overrides" in spec else {}
+        if cleaned_overrides:
+            entity["render_overrides"] = cleaned_overrides
         out[view_id] = entity
     return out
 
@@ -485,13 +522,30 @@ def render_tree(root_name: str, tree: dict) -> str:
     return "\n".join(lines)
 
 
-def render_silhouette(root_name: str, tree: dict, selected: set[str]) -> str:
+def _effective_flag(overrides: dict | None, path: str, field: str, node: dict) -> bool:
+    """渲染控制字段的有效值：视图覆盖（render_overrides）> 条目全局字段 > 默认值 False。
+
+    hidden 与 collapsed 同用此链——布尔双向（覆盖 false 可反向撤销全局 true），
+    覆盖 true 可在全局缺省时单独生效。
+    """
+    if overrides:
+        spec = overrides.get(path)
+        if spec is not None and field in spec:
+            return spec[field]
+    return bool(node.get(field))
+
+
+def render_silhouette(root_name: str, tree: dict, selected: set[str], overrides: dict | None = None) -> str:
     """选中集投回全树结构的剪影渲染。
 
     选中条目正常渲染（简介照常、选中目录 collapsed 折叠生效）；仅含选中后代
     的未选中祖先目录作路径骨架——只作容器：无简介、忽略 collapsed 强制展开
     （折叠会让剪影丢内容）。hidden 条目在任何视图不出现（hidden 目录连同
     子树整体跳过，与简版树同语义）；空选中集仅剩首行全局 root 名。
+    overrides 为视图级渲染覆盖（render_overrides）：按路径索引改写 hidden/
+    collapsed 的有效值（视图覆盖 > 全局字段 > 默认值，布尔双向），只影响
+    渲染可见性——不改求值集合、不改数据；祖先有效 hidden=true 先行剪枝，
+    其后代的覆盖不再查询（与全局 hidden 同语义）。
     """
     skeleton: set[str] = set()
     for path in selected:
@@ -501,21 +555,26 @@ def render_silhouette(root_name: str, tree: dict, selected: set[str]) -> str:
             if ancestor not in selected:
                 skeleton.add(ancestor)
     lines = [root_name + "/"]
-    lines.extend(_silhouette_lines(tree, "", [], selected, skeleton))
+    lines.extend(_silhouette_lines(tree, "", [], selected, skeleton, overrides))
     return "\n".join(lines)
 
 
-def _silhouette_lines(children: dict, prefix: str, parts: list[str], selected: set[str], skeleton: set[str]) -> list[str]:
+def _silhouette_lines(
+    children: dict, prefix: str, parts: list[str], selected: set[str], skeleton: set[str],
+    overrides: dict | None = None,
+) -> list[str]:
     """剪影的单层子级渲染（与 render_children_lines 同款对齐）：仅渲染选中条目与骨架祖先。
 
     hidden 节点连同子树跳过；骨架目录不显示简介且不折叠；选中条目简介照常、
-    目录 collapsed 生效（折叠即不再下钻，与简版树一致）。
+    目录 collapsed 生效（折叠即不再下钻，与简版树一致）。hidden/collapsed 取
+    有效值（视图覆盖 > 全局字段 > 默认值），骨架目录的 collapsed 覆盖被忽略
+    （强制展开规则不破例）。
     """
     items = []
     for name, node in sorted(children.items(), key=lambda kv: sort_key(kv[0])):
-        if node.get("hidden"):
-            continue
         path = "/".join(parts + [name])
+        if _effective_flag(overrides, path, "hidden", node):
+            continue
         if path in selected:
             items.append((name, node, True))
         elif path in skeleton:
@@ -526,19 +585,20 @@ def _silhouette_lines(children: dict, prefix: str, parts: list[str], selected: s
     for i, (name, node, is_sel) in enumerate(items):
         connector = "└── " if i == len(items) - 1 else "├── "
         suffix = "/" if is_dir(node) else ""
-        if suffix and is_sel and node.get("collapsed") and node["children"]:
+        if suffix and is_sel and node["children"] and _effective_flag(overrides, "/".join(parts + [name]), "collapsed", node):
             suffix = "/…"  # 仅选中目录可折叠；骨架目录必须展开到选中后代
         stems.append(prefix + connector + name + suffix)
     column = max(len(s) for s in stems) + 1
     lines = []
     for i, ((name, node, is_sel), stem) in enumerate(zip(items, stems)):
         cont_prefix = prefix + ("    " if i == len(items) - 1 else "│   ")
+        collapsed = _effective_flag(overrides, "/".join(parts + [name]), "collapsed", node)
         if is_sel and node.get("desc"):
             lines.append(stem + " " * (column - len(stem)) + "# " + node["desc"])
         else:
             lines.append(stem)
-        if is_dir(node) and node["children"] and not (is_sel and node.get("collapsed")):
-            lines.extend(_silhouette_lines(node["children"], cont_prefix, parts + [name], selected, skeleton))
+        if is_dir(node) and node["children"] and not (is_sel and collapsed):
+            lines.extend(_silhouette_lines(node["children"], cont_prefix, parts + [name], selected, skeleton, overrides))
     return lines
 
 
@@ -576,6 +636,35 @@ def compile_filter(unders, tags, excludes) -> dict:
     if len(children) == 1:
         return children[0]
     return {"op": "and", "children": children}
+
+
+def compile_overrides(overrides, collapse, expand, hide, show) -> dict:
+    """覆盖来源合并为 render_overrides：清单（overrides）或快捷参数编译，二选一。
+
+    快捷参数编译（路径归一、组内确定性）：--collapse/--expand → collapsed
+    true/false，--hide/--show → hidden true/false；同路径不同字段合并、同
+    路径同字段冲突报错。返回 {} 表示无覆盖（upsert 时移除键）。
+    """
+    shortcut = [
+        ("/".join(split_rel_path(p)), field, value)
+        for p, field, value in [
+            *((c, "collapsed", True) for c in (collapse or [])),
+            *((e, "collapsed", False) for e in (expand or [])),
+            *((h, "hidden", True) for h in (hide or [])),
+            *((s, "hidden", False) for s in (show or [])),
+        ]
+    ]
+    if overrides is not None:
+        if shortcut:
+            raise ToolError("--overrides 清单与快捷参数（--collapse/--expand/--hide/--show）互斥，二选一")
+        return overrides  # 原样交由 normalize 校验归一
+    merged: dict[str, dict] = {}
+    for path, field, value in shortcut:
+        spec = merged.setdefault(path, {})
+        if field in spec and spec[field] is not value:
+            raise ToolError(f"路径 {path} 的 {field} 覆盖冲突（同一路径同字段不可既 true 又 false）")
+        spec[field] = value
+    return merged
 
 
 def eval_filter(filt: dict, tree: dict) -> set[str]:
@@ -1331,13 +1420,28 @@ class TreeTool:
             elif tag not in data.get("tags", {}):
                 raise ToolError(f"过滤器 tag 引用未登记标签: {tag}（先 tag-add 登记再使用）")
 
+    def _validate_view_overrides(self, data: dict, overrides: dict) -> None:
+        """渲染覆盖引用预检（写盘前；与过滤器预检同时机）：路径必须在树中、
+        collapsed 覆盖必须指向目录条目（与全局 collapsed 字段同严格性）。
+
+        悬空覆盖（rm 后的合法中间态）由渲染层静默忽略 + check 诊断兜底，
+        不阻塞数据操作。
+        """
+        for path in sorted(overrides, key=sort_key):
+            node = find_node(data["tree"], split_rel_path(path))
+            if node is None:
+                raise ToolError(f"render_overrides 引用不在树中: {path}")
+            if "collapsed" in overrides[path] and not is_dir(node):
+                raise ToolError(f"render_overrides 的 collapsed 仅可用于目录条目（文件条目请用 hidden）: {path}")
+
     def _view_renderable(self, view_id: str, spec: dict, data: dict, quiet: bool = False) -> str | None:
         """返回剪影内容；不可渲染时打印告警并返回 None——渲染管线跳过该视图而非整体失败。
 
         悬空 under 引用（数据操作后的合法中间态，如锚点被 rm）跳过渲染，坏配置
         留给 view-list 呈现与 check 诊断；tag 引用未登记不在此拦截——自然求值为
         空集（空剪影仅剩根名行）。quiet=True 供 check 复用求值而不打渲染期
-        告警（check 以自己的两级消息呈现）。
+        告警（check 以自己的两级消息呈现）；render_overrides 原样传入剪影
+        渲染：悬空覆盖项按路径查表天然落空（静默忽略），check 归诊断。
         """
         filt = spec.get("filter", {})
         dangling = sorted(
@@ -1349,7 +1453,7 @@ class TreeTool:
                 print(f"警告: 视图 {view_id} 过滤器 under 引用不在树中或非目录: {', '.join(dangling)}，跳过渲染", file=sys.stderr)
             return None
         name, _custom = self.current_root_name()
-        return render_silhouette(name, data["tree"], eval_filter(filt, data["tree"]))
+        return render_silhouette(name, data["tree"], eval_filter(filt, data["tree"]), spec.get("render_overrides"))
 
     @staticmethod
     def _plan_view_block(text: str, begin: str, end: str, content: str, target_line: int | None, doc_rel: str) -> str:
@@ -1415,16 +1519,21 @@ class TreeTool:
             updated += self._render_view(view_id, spec, data)
         return updated
 
-    def view_add(self, view_id: str, unders=None, tags=None, excludes=None, filt=None, doc=None, line=None) -> None:
-        """登记/更新视图：过滤器表达式树落盘 + 渲染绑定文档。
+    def view_add(self, view_id: str, unders=None, tags=None, excludes=None, filt=None, doc=None, line=None,
+                 overrides=None, collapse=None, expand=None, hide=None, show=None) -> None:
+        """登记/更新视图：过滤器表达式树 + 渲染覆盖 + 绑定文档。
 
         过滤器来源二选一：filt（清单文件承载的任意布尔组合）或快捷参数编译
         （unders 多锚点并集、× tags 交集、减 excludes 差集 → 规范表达式树），
-        两者互斥。写盘前预检：表达式结构规范化、引用校验（under 须树中目录、
-        tag 须已登记）——拒绝不落盘不留历史；选中 0 条告警放行（空视图）。
-        同 id 重复执行 = upsert：过滤器与绑定文档清单替换为本次参数；块已存在
-        时默认原地更新，--line 给定时重定位。一次变更 = 一步撤销历史（快照含
-        受影响文档全文，undo/redo 连同块位置一并恢复）。
+        两者互斥。渲染覆盖来源同样二选一：overrides（清单 dict）或快捷参数
+        （collapse/expand → collapsed true/false、hide/show → hidden true/false），
+        编译为 render_overrides 落盘（优先级：视图覆盖 > 条目全局字段 > 默认值，
+        布尔双向）。写盘前预检：表达式结构规范化、引用校验（under 须树中目录、
+        tag 须已登记、覆盖路径须在树中且 collapsed 指向目录）——拒绝不落盘不留
+        历史；选中 0 条告警放行（空视图）。同 id 重复执行 = upsert：过滤器、
+        绑定文档清单与覆盖配置整体替换为本次参数（不给覆盖参数 = 移除键）；
+        块已存在时默认原地更新，--line 给定时重定位。一次变更 = 一步撤销历史
+        （快照含受影响文档全文，undo/redo 连同块位置一并恢复）。
         """
         if line is not None and doc is None:
             raise ToolError("--line 须与 --doc 同用（行号是绑定文档内的落位参数）")
@@ -1444,8 +1553,10 @@ class TreeTool:
                 raise ToolError("过滤器缺范围来源：至少给一个 --under 或 --tag，或改用 --filter 清单承载完整表达式")
             expr = compile_filter(unders, tags, excludes)
         expr = _normalize_filter(expr)  # 结构校验 + 归一（清单原始 JSON 收敛为规范形态）
+        ov = compile_overrides(overrides, collapse, expand, hide, show)
         data = self.load()
         self._validate_view_filter(data, expr)  # 引用预检：拒绝保持原子（T1 拒绝原子性模式）
+        self._validate_view_overrides(data, ov)
         docs_list: list[str] = []
         if doc is not None:
             doc_rel = "/".join(split_rel_path(doc))
@@ -1459,8 +1570,10 @@ class TreeTool:
         views[view_id] = {"filter": expr}
         if docs_list:
             views[view_id]["docs"] = docs_list
+        if ov:
+            views[view_id]["render_overrides"] = ov
         candidate["views"] = views
-        normalize_data(candidate)  # 写前预检（render_overrides 等手改在此拦截，拒绝不留半截历史）
+        normalize_data(candidate)  # 写前预检（结构非法的手改数据在此拦截，拒绝不留半截历史）
         if docs_list:  # 渲染计划 dry-run：行号越界/孤立标记/同 id 多块等在落盘前暴露，拒绝保持原子
             content = self._view_renderable(view_id, views[view_id], data)
             if content is not None:
@@ -1785,6 +1898,15 @@ class TreeTool:
             elif ref not in path_set:
                 errors.append(f"E: {src} rel 目标不在树中: {ref}")
 
+        # 视图渲染覆盖引用（T1 时机裁定：悬空不阻塞数据操作，check 诊断兜底）
+        for view_id, spec in sorted(data.get("views", {}).items(), key=lambda kv: sort_key(kv[0])):
+            for ov_path in sorted(spec.get("render_overrides", {}), key=sort_key):
+                node = find_node(tree, split_rel_path(ov_path))
+                if node is None:
+                    errors.append(f"E: 视图 {view_id} render_overrides 引用不在树中: {ov_path}")
+                elif "collapsed" in spec["render_overrides"][ov_path] and not is_dir(node):
+                    errors.append(f"E: 视图 {view_id} render_overrides 的 collapsed 仅可用于目录条目: {ov_path}")
+
         git_files = self._git_files()
         if git_files is None:
             pass  # 非 git 环境静默跳过磁盘对照，由 CLI 层提示
@@ -2100,18 +2222,38 @@ def _load_filter_manifest(manifest_str: str):
     try:
         raw = manifest.read_text(encoding="utf-8")
     except OSError as exc:
-        raise ToolError(f"清单文件不可读: {manifest}（{exc}）")
+        raise ToolError(f"清单文件不可读: {manifest}（{exc}）") from exc
     try:
         obj = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ToolError(f"清单 JSON 解析失败: {exc}")
+        raise ToolError(f"清单 JSON 解析失败: {exc}") from exc
     if not isinstance(obj, dict) or "filter" not in obj:
         raise ToolError('清单顶层须为对象且含 "filter" 键，如 {"filter": {"op": "under", "path": "apps"}}')
     return obj["filter"]
 
 
+def _load_overrides_manifest(manifest_str: str):
+    """读取 --overrides 清单：顶层对象含 overrides 键（覆盖表原样交由 view-add 校验归一）。"""
+    manifest = Path(manifest_str)
+    try:
+        raw = manifest.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ToolError(f"清单文件不可读: {manifest}（{exc}）") from exc
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ToolError(f"清单 JSON 解析失败: {exc}") from exc
+    if not isinstance(obj, dict) or "overrides" not in obj:
+        raise ToolError(
+            '清单顶层须为对象且含 "overrides" 键，'
+            '如 {"overrides": {"apps/ui": {"collapsed": true}}}'
+        )
+    return obj["overrides"]
+
+
 def _cmd_view_add(tool: TreeTool, args) -> None:
     filt = _load_filter_manifest(args.filter) if args.filter else None
+    overrides = _load_overrides_manifest(args.overrides) if getattr(args, "overrides", None) else None
     tool.view_add(
         args.view_id,
         unders=args.under,
@@ -2120,6 +2262,11 @@ def _cmd_view_add(tool: TreeTool, args) -> None:
         filt=filt,
         doc=args.doc,
         line=args.line,
+        overrides=overrides,
+        collapse=getattr(args, "collapse", None),
+        expand=getattr(args, "expand", None),
+        hide=getattr(args, "hide", None),
+        show=getattr(args, "show", None),
     )
     target = f" -> {args.doc}" + (f"（围栏首行第 {args.line} 行）" if args.line else "") if args.doc else ""
     print(f"已登记视图并渲染: {args.view_id}{target}（一次变更，单步历史）")
@@ -2291,6 +2438,15 @@ def main(argv=None) -> int:
     )
     p.add_argument("--doc", help="绑定文档（仓库相对路径，需已存在；缺省仅落盘配置不渲染）")
     p.add_argument("--line", type=int, help="围栏首行落点：插在当前第 N 行内容之前（1-based，越界报错）；省略则块存在原地更新、缺失追加文档尾部；同 id 已有块时重定位以删除旧块后的行号为准")
+    p.add_argument("--collapse", action="append", metavar="PATH", help="视图内折叠的目录（树中已存在的目录条目），可重复：本视图渲染带 … 不展开")
+    p.add_argument("--expand", action="append", metavar="PATH", help="视图内展开的目录（反向覆盖全局 collapsed），可重复")
+    p.add_argument("--hide", action="append", metavar="PATH", help="视图内隐藏的条目（含其子树），可重复")
+    p.add_argument("--show", action="append", metavar="PATH", help="视图内显示的条目（反向覆盖全局 hidden），可重复")
+    p.add_argument(
+        "--overrides",
+        help='渲染覆盖清单 JSON 路径（多覆盖项走清单），顶层为 {"overrides": {"apps/ui": {"collapsed": true, "hidden": false}}}；'
+        "与快捷参数（--collapse/--expand/--hide/--show）互斥；优先级：视图覆盖 > 条目全局字段 > 默认值，布尔双向",
+    )
 
     sub.add_parser("view-list", help="列出全部视图概要（id / 过滤器摘要 / 绑定文档数 / 块存在情况）")
 
