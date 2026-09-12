@@ -27,6 +27,9 @@ tag 已登记标签）在 view-add 写盘前预检拒绝。剪影把选中集投
 删块：每文档删前校验恰好一个，原子拒绝半删状态）。同一文档内同 id 出现多
 于一个块属病态：相关命令（view-doc、view-add、触发渲染的数据命令）报错
 并指明文档路径与块数，不做猜测性修复。
+check 对视图做两级诊断：错误 = 绑定文档缺块 / 同 id 多块 / 块内容与渲染
+产物漂移（消息附纠正出路）；告警 = 全仓库 .md 扫到未登记 id 的孤儿标记块
+（豁免技能目录与代码围栏内示意行；块自身包裹围栏不算豁免围栏）。
 detail 完整描述只存于 tree.json 供查询，不渲染。渲染控制字段只影响树渲染：
 目录 collapsed=true 折叠（目录行带 … 不展开 children）；条目 hidden=true
 整体隐藏（含子树）；两者默认 false（不落盘），数据、查询与 check 校验始终
@@ -74,6 +77,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -95,6 +99,10 @@ VIEW_ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 VIEW_ID_RESERVED = "default"
 # 过滤器表达式树的节点算子（spec 一期 schema 定稿；求值与渲染消费已全量支持五种节点）
 FILTER_OPS = frozenset({"and", "or", "not", "under", "tag"})
+# 孤儿标记块的宽松行匹配（check 告警级扫描用）：比整行精确匹配宽——手写笔误
+# 恰是形态不精确的标记行；id 段排除冒号/尖括号/空白，防吞注释后半文案
+VIEW_MARKER_BEGIN_RE = re.compile(r"^\s*<!--\s*file-tree:tree\^id=([^:>\s]+):begin")
+VIEW_MARKER_END_RE = re.compile(r"^\s*<!--\s*file-tree:tree\^id=[^:>\s]+:end")
 
 
 DESC_MAX = 20
@@ -1323,12 +1331,13 @@ class TreeTool:
             elif tag not in data.get("tags", {}):
                 raise ToolError(f"过滤器 tag 引用未登记标签: {tag}（先 tag-add 登记再使用）")
 
-    def _view_renderable(self, view_id: str, spec: dict, data: dict) -> str | None:
+    def _view_renderable(self, view_id: str, spec: dict, data: dict, quiet: bool = False) -> str | None:
         """返回剪影内容；不可渲染时打印告警并返回 None——渲染管线跳过该视图而非整体失败。
 
         悬空 under 引用（数据操作后的合法中间态，如锚点被 rm）跳过渲染，坏配置
         留给 view-list 呈现与 check 诊断；tag 引用未登记不在此拦截——自然求值为
-        空集（空剪影仅剩根名行），check 归诊断票。
+        空集（空剪影仅剩根名行）。quiet=True 供 check 复用求值而不打渲染期
+        告警（check 以自己的两级消息呈现）。
         """
         filt = spec.get("filter", {})
         dangling = sorted(
@@ -1336,7 +1345,8 @@ class TreeTool:
             key=sort_key,
         )
         if dangling:
-            print(f"警告: 视图 {view_id} 过滤器 under 引用不在树中或非目录: {', '.join(dangling)}，跳过渲染", file=sys.stderr)
+            if not quiet:
+                print(f"警告: 视图 {view_id} 过滤器 under 引用不在树中或非目录: {', '.join(dangling)}，跳过渲染", file=sys.stderr)
             return None
         name, _custom = self.current_root_name()
         return render_silhouette(name, data["tree"], eval_filter(filt, data["tree"]))
@@ -1644,13 +1654,80 @@ class TreeTool:
             return None
         return {line for line in proc.stdout.splitlines() if line.strip()}
 
+    def _skill_dir_rel(self) -> str | None:
+        """技能目录的仓库相对 posix 路径；不在仓库内（异常部署）返回 None。"""
+        try:
+            return self.tree_json.parent.relative_to(self.repo_root).as_posix()
+        except ValueError:
+            return None
+
     def _is_skill_pycache(self, path: str) -> bool:
         """技能目录内的 __pycache__（契约测试运行产物）：运行时缓存，豁免未收录告警。"""
-        try:
-            skill_rel = self.tree_json.parent.relative_to(self.repo_root).as_posix()
-        except ValueError:
-            return False
-        return path.startswith(skill_rel + "/") and "__pycache__/" in path
+        skill_rel = self._skill_dir_rel()
+        return skill_rel is not None and path.startswith(skill_rel + "/") and "__pycache__/" in path
+
+    def _iter_repo_markdown(self) -> list[tuple[str, Path]]:
+        """仓库内全部 .md 文件（跳过 .git 与技能目录），按路径确定性排序。
+
+        走磁盘遍历而非 git 清单：孤儿块恰恰常在未跟踪的手写文档里，扫描
+        不应依赖 git 可用性。
+        """
+        skill_rel = self._skill_dir_rel()
+        out: list[tuple[str, Path]] = []
+        for dirpath, dirnames, filenames in os.walk(self.repo_root):
+            dirnames[:] = sorted(d for d in dirnames if d != ".git")
+            for name in filenames:
+                if not name.lower().endswith(".md"):
+                    continue
+                path = Path(dirpath) / name
+                rel = path.relative_to(self.repo_root).as_posix()
+                if skill_rel is not None and rel.startswith(skill_rel + "/"):
+                    continue
+                out.append((rel, path))
+        out.sort(key=lambda kv: sort_key(kv[0]))
+        return out
+
+    def _scan_orphan_view_markers(self, known_ids: set[str]) -> list[str]:
+        """全仓库孤儿标记块扫描（告警级）：带 id 的 begin 标记行命中未登记 id 即告警。
+
+        豁免两条：技能目录（技能自身文档的格式示例）；代码围栏内的示意行。
+        围栏判定为逐行开关状态机——begin 紧贴围栏开行时视作块自身包裹围栏、
+        不豁免（否则 view-rm 保留产物全被漏检）；围栏首行紧跟标记行的"完整
+        块形态示意"与真块在文本层不可区分，同样按真块报告。begin 命中后跳读
+        至 end 形态行，块内围栏行不扰动状态机。
+        """
+        warnings: list[str] = []
+        for rel, path in self._iter_repo_markdown():
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue  # 读不了的文件无从诊断，跳过不阻断
+            lines = text.replace("\r\n", "\n").split("\n")
+            fenced = False
+            i = 0
+            while i < len(lines):
+                line = lines[i]
+                if line.lstrip().startswith(FENCE):
+                    fenced = not fenced
+                    i += 1
+                    continue
+                m = VIEW_MARKER_BEGIN_RE.match(line)
+                if m is None:
+                    i += 1
+                    continue
+                view_id = m.group(1)
+                if view_id not in known_ids:
+                    prev_fence = i > 0 and lines[i - 1].lstrip().startswith(FENCE)
+                    if prev_fence or not fenced:
+                        warnings.append(
+                            f"W: 未登记视图 id 的孤儿标记块: {rel}:{i + 1} id={view_id}"
+                            f"（手写笔误或 view-rm 保留产物；登记用 view-add，或手改删除该块）"
+                        )
+                j = i + 1
+                while j < len(lines) and VIEW_MARKER_END_RE.match(lines[j]) is None:
+                    j += 1
+                i = j + 1  # 截断文件无 end 时 j 越界，i 随之退出循环
+        return warnings
 
     def check(self, strict: bool = False) -> tuple[list[str], list[str]]:
         errors: list[str] = []
@@ -1777,6 +1854,53 @@ class TreeTool:
                     continue
                 if actual != content_fn():
                     errors.append(f"E: {self.agents_md.name} 标记块内容与 tree.json 不一致（产物过期或被手改），运行 render")
+
+        # 视图产物一致性（views × 绑定文档）：缺块 / 同 id 多块 / 块内容漂移。
+        # 不可渲染视图（锚点悬空等渲染期告警的同类病态）降为告警，与渲染期两级一致
+        views = data.get("views", {})
+        for view_id, spec in sorted(views.items(), key=lambda kv: sort_key(kv[0])):
+            begin, end = view_tree_markers(view_id)
+            made = self._view_renderable(view_id, spec, data, quiet=True)
+            if made is None:
+                warnings.append(
+                    f"W: 视图 {view_id} 当前不可渲染（过滤器 under 引用不在树中或非目录），跳过其绑定文档的块内容比对"
+                )
+            for doc_rel in spec.get("docs", []):
+                try:
+                    disk_doc = self._doc_path(doc_rel).read_text(encoding="utf-8").replace("\r\n", "\n")
+                except FileNotFoundError:
+                    errors.append(
+                        f"E: 视图 {view_id} 绑定文档不存在: {doc_rel}"
+                        f"（恢复文档，或用 view-add 重建绑定清单移除悬空绑定）"
+                    )
+                    continue
+                doc_lines = disk_doc.split("\n")
+                n_begin, n_end = doc_lines.count(begin), doc_lines.count(end)
+                if n_begin > 1:
+                    errors.append(
+                        f"E: 视图 {view_id} 文档 {doc_rel} 存在 {n_begin} 个同 id 标记块（恰好 1 个），"
+                        f"手改删除多余块后重跑 render"
+                    )
+                    continue
+                if n_begin == 0:
+                    if n_end > 0:
+                        errors.append(f"E: 视图 {view_id} 文档 {doc_rel} 缺开始标记且残留孤立结束标记（文件被改坏？）")
+                    else:
+                        errors.append(
+                            f"E: 视图 {view_id} 文档 {doc_rel} 缺标记块，重跑 view-add {view_id} 或任一数据命令可纠正"
+                        )
+                    continue
+                if n_end == 0:
+                    errors.append(f"E: 视图 {view_id} 文档 {doc_rel} 缺结束标记（文件被改坏？）")
+                    continue
+                if made is not None and block_content(disk_doc, begin, end) != made:
+                    errors.append(
+                        f"E: 视图 {view_id} 文档 {doc_rel} 标记块内容与渲染产物不一致（产物过期或被手改），"
+                        f"重跑 view-add {view_id} 或任一数据命令可纠正"
+                    )
+
+        # 孤儿标记块扫描（全仓库 .md，豁免技能目录与代码围栏内示意行）
+        warnings.extend(self._scan_orphan_view_markers(set(views)))
 
         # 历史位置收敛提示：legacy 残留说明仓库初始化晚于技能使用，待迁移
         for legacy in self.legacy_history_paths:
@@ -2065,7 +2189,7 @@ def _cmd_check(tool: TreeTool, args) -> int:
         print(line)
     total = len(errors) + len(warnings)
     if total == 0:
-        print("check 通过：规范形态、词表、rel、磁盘对照、渲染产物全部一致")
+        print("check 通过：规范形态、词表、rel、磁盘对照、渲染产物与视图块全部一致")
         return 0
     print(f"check 发现 {len(errors)} 错误 / {len(warnings)} 告警")
     return 1

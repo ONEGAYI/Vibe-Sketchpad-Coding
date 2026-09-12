@@ -4192,6 +4192,189 @@ class ViewsCompatTest(ViewSandboxTest):
         self.assertFalse((tool.repo_root / "docs" / "a.md").exists())
 
 
+class CheckViewDiagnosisTest(ViewSandboxTest):
+    """check 错误级诊断：绑定文档缺块 / 同 id 多块 / 块内容漂移 / 文档缺失。
+
+    不可渲染视图（锚点悬空等渲染期告警的同类病态）在 check 中降为告警，
+    与渲染期两级保持一致，不推翻 T1 已定边界。
+    """
+
+    def bind_one(self, tool: TreeTool, rel: str = "docs/a.md") -> None:
+        tool.view_add("v", unders=["apps"], doc=rel)
+
+    def test_clean_view_repo_passes(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        self.bind_one(tool)
+        tool.render()
+        self.assertEqual(tool.check(), ([], []))
+
+    def test_missing_block_reported(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        self.bind_one(tool)
+        tool.render()
+        self.write_doc(tool, "docs/a.md", "# A\n（块被手删）\n")
+        errors, _ = tool.check()
+        view_errors = [e for e in errors if "视图 v" in e]
+        self.assertEqual(len(view_errors), 1)  # 只报一条，不重复
+        self.assertIn("缺标记块", view_errors[0])
+        self.assertIn("docs/a.md", view_errors[0])
+        self.assertIn("view-add", view_errors[0])  # 消息给出纠正出路
+
+    def test_orphan_end_marker_reported(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        self.bind_one(tool)
+        tool.render()
+        begin, _end = view_tree_markers("v")
+        lines = self.doc_text(tool, "docs/a.md").split("\n")
+        lines.remove(begin)  # 只删开始标记行 → begin 缺失、end 残留
+        self.write_doc(tool, "docs/a.md", "\n".join(lines))
+        errors, _ = tool.check()
+        self.assertTrue(any("孤立结束标记" in e for e in errors))
+
+    def test_multi_block_reported(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        self.bind_one(tool)
+        tool.render()
+        begin, end = view_tree_markers("v")
+        text = append_view_block(self.doc_text(tool, "docs/a.md"), begin, end, "Demo/\n")
+        self.write_doc(tool, "docs/a.md", text)
+        errors, _ = tool.check()
+        hits = [e for e in errors if "同 id" in e]
+        self.assertEqual(len(hits), 1)
+        self.assertIn("2 个", hits[0])
+        self.assertIn("docs/a.md", hits[0])
+
+    def test_content_drift_reported_and_render_heals(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        self.bind_one(tool)
+        tool.render()
+        begin, end = view_tree_markers("v")
+        lines = self.doc_text(tool, "docs/a.md").split("\n")
+        lines.insert(lines.index(end), "手改漂移行")  # 块内内容被手改
+        self.write_doc(tool, "docs/a.md", "\n".join(lines))
+        errors, _ = tool.check()
+        hits = [e for e in errors if "视图 v" in e]
+        self.assertEqual(len(hits), 1)
+        self.assertIn("不一致", hits[0])
+        self.assertIn("docs/a.md", hits[0])
+        self.assertIn("view-add", hits[0])  # 纠正出路
+        tool.render()  # 消息承诺的出路真实有效：重渲染后恢复全绿
+        self.assertEqual(tool.check(), ([], []))
+
+    def test_missing_bound_doc_reported(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        self.bind_one(tool)
+        tool.render()
+        (tool.repo_root / "docs" / "a.md").unlink()
+        errors, _ = tool.check()
+        hits = [e for e in errors if "视图 v" in e]
+        self.assertEqual(len(hits), 1)
+        self.assertIn("绑定文档不存在", hits[0])
+        self.assertIn("docs/a.md", hits[0])
+
+    def test_unrenderable_view_warns_instead_of_error(self):
+        # 锚点悬空（数据命令的合法产物）：块存在性照查，内容比对降为告警（与渲染期两级一致）
+        import io
+        from contextlib import redirect_stderr
+
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        self.bind_one(tool)
+        tool.rm("apps")  # 锚点悬空（只写数据不渲染）
+        with redirect_stderr(io.StringIO()):
+            tool.render()  # 默认视图照常刷新，视图渲染跳过（stderr 告警）
+        errors, warnings = tool.check()
+        self.assertEqual(errors, [])
+        self.assertTrue(any("不可渲染" in w for w in warnings))
+
+
+class CheckOrphanScanTest(ViewSandboxTest):
+    """check 告警级诊断：全仓库孤儿标记块扫描（未登记 id），豁免技能目录与代码围栏内示意行。"""
+
+    def make_orphan(self, tool: TreeTool, rel: str, view_id: str, content: str = "Demo/\n") -> str:
+        begin, end = view_tree_markers(view_id)
+        text = append_view_block(self.doc_text(tool, rel), begin, end, content)
+        self.write_doc(tool, rel, text)
+        return text
+
+    def test_orphan_block_reported_with_file_and_line(self):
+        tool = self.make_view_tool(docs={"docs/g.md": "# G\n"})
+        tool.view_add("v", unders=["apps"], doc="docs/g.md")
+        tool.render()
+        text = self.make_orphan(tool, "docs/g.md", "typo-id")
+        begin, _end = view_tree_markers("typo-id")
+        line_no = text.split("\n").index(begin) + 1
+        errors, warnings = tool.check()
+        self.assertEqual(errors, [])
+        hits = [w for w in warnings if "typo-id" in w]
+        self.assertEqual(len(hits), 1)
+        self.assertIn(f"docs/g.md:{line_no}", hits[0])  # 文件与行号定位
+
+    def test_orphan_warning_fails_strict(self):
+        tool = self.make_view_tool(docs={"docs/g.md": "# G\n"})
+        tool.view_add("v", unders=["apps"], doc="docs/g.md")
+        tool.render()
+        self.make_orphan(tool, "docs/g.md", "typo-id")
+        errors, warnings = tool.check(strict=True)
+        self.assertEqual(warnings, [])
+        self.assertTrue(any("typo-id" in e and "E(strict)" in e for e in errors))
+
+    def test_registered_id_kept_block_not_flagged(self):
+        # view-doc --rm 的合法产物：解绑保留的块（id 仍登记）不误报孤儿、不报缺块
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
+        tool.view_doc("v", add="docs/b.md")
+        tool.view_doc("v", rm="docs/b.md")
+        tool.render()
+        self.assertEqual(tool.check(), ([], []))
+
+    def test_bare_marker_line_reported(self):
+        # 无围栏包裹的裸标记行（手抄半截）同样命中扫描
+        tool = self.make_view_tool(docs={"docs/t.md": "# T\n"})
+        tool.render()
+        begin, end = view_tree_markers("ghost")
+        self.write_doc(tool, "docs/t.md", f"# T\n\n{begin}\n{end}\n")
+        errors, warnings = tool.check()
+        self.assertEqual(errors, [])
+        self.assertTrue(any("ghost" in w for w in warnings))
+
+    def test_skill_dir_exempt(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.render()
+        begin, end = view_tree_markers("ghost")
+        note = tool.tree_json.parent / "NOTE.md"
+        note.write_text(f"# 技能内部说明\n\n```\n{begin}\n内容示意\n{end}\n```\n", encoding="utf-8")
+        _errors, warnings = tool.check()
+        self.assertFalse(any("ghost" in w for w in warnings))
+
+    def test_fenced_example_lines_exempt(self):
+        # 代码围栏内的示意标记行（非紧贴围栏首行）不误报
+        tool = self.make_view_tool(docs={"docs/t.md": "# T\n"})
+        tool.render()
+        begin, end = view_tree_markers("demo")
+        doc = (
+            "# T\n\n示例：\n\n```\n"
+            "标记行格式如下：\n"
+            f"{begin}\n"
+            f"{end}\n"
+            "```\n"
+        )
+        self.write_doc(tool, "docs/t.md", doc)
+        errors, warnings = tool.check()
+        self.assertEqual((errors, warnings), ([], []))
+
+    def test_no_views_repo_still_scans(self):
+        # 无 views 配置的仓库同样扫描孤儿块（只增告警能力，不改变错误级行为）
+        tool = self.make_tool()
+        tool.render()
+        begin, end = view_tree_markers("ghost")
+        docs_dir = tool.repo_root / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "t.md").write_text(f"# T\n\n```\n{begin}\nDemo/\n{end}\n```\n", encoding="utf-8")
+        errors, warnings = tool.check()
+        self.assertEqual(errors, [])
+        self.assertTrue(any("ghost" in w for w in warnings))
+
+
 class CmdViewTest(FilterSandboxTest):
     """CLI 层 view-add / view-list：参数接线（快捷参数/清单文件）与输出。"""
 
