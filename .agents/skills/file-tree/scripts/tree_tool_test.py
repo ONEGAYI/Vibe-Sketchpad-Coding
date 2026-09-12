@@ -2611,6 +2611,72 @@ class ViewSandboxTest(SandboxTest):
             self.write_doc(tool, rel, text)
         return tool
 
+    def rendered_block(self, tool: TreeTool, view_id: str, rel: str) -> str:
+        """读取绑定文档中视图块的渲染内容（标记行之间，不含围栏）。"""
+        begin, end = view_tree_markers(view_id)
+        text = self.doc_text(tool, rel)
+        return text[text.index(begin) + len(begin) + 1 : text.index(end)]
+
+
+def make_filter_data() -> dict:
+    """T2 过滤器用例数据：多目录 + 根级散文件 + 三标签（core/doc/misc），供求值、投影与编译验证。"""
+    return {
+        "tags": {"core": "核心", "doc": "文档", "misc": "杂项"},
+        "tree": {
+            "apps": {
+                "desc": "应用层",
+                "children": {
+                    "main.tsx": {"desc": "入口", "detail": ["x"], "tags": ["core"]},
+                    "ui": {
+                        "desc": "UI 组件",
+                        "children": {
+                            "button.tsx": {"desc": "按钮", "detail": ["x"], "tags": ["doc"]},
+                            "input.tsx": {"desc": "输入框", "detail": ["x"], "tags": ["doc"]},
+                        },
+                    },
+                },
+            },
+            "docs": {
+                "desc": "文档目录",
+                "children": {
+                    "guide.md": {"desc": "指南", "detail": ["x"], "tags": ["doc"]},
+                },
+            },
+            "Cargo.toml": {"desc": "根配置", "detail": ["x"]},
+            "README.md": {"desc": "说明", "detail": ["x"], "tags": ["doc"]},
+        },
+    }
+
+
+def collect_paths(tree: dict) -> set[str]:
+    """测试侧独立收集全量条目路径（黑盒期望构造，不经被测求值引擎）。"""
+    out: set[str] = set()
+
+    def walk(children: dict, prefix: list[str]) -> None:
+        for name, node in children.items():
+            path = "/".join(prefix + [name])
+            out.add(path)
+            if isinstance(node.get("children"), dict):
+                walk(node["children"], prefix + [name])
+
+    walk(tree, [])
+    return out
+
+
+def select_under(tree: dict, anchor: str) -> set[str]:
+    """单锚点 under 选中集的测试侧语义：锚点自身含入 + 全部后代。"""
+    return {p for p in collect_paths(tree) if p == anchor or p.startswith(anchor + "/")}
+
+
+class FilterSandboxTest(ViewSandboxTest):
+    """T2 过滤器用例公共夹具。"""
+
+    def make_filter_tool(self, docs: dict[str, str] | None = None) -> TreeTool:
+        tool = self.make_tool(data=make_filter_data())
+        for rel, text in (docs or {}).items():
+            self.write_doc(tool, rel, text)
+        return tool
+
 
 class ViewsSchemaTest(SandboxTest):
     """views 顶层键的 schema 契约：id 语法、过滤器表达式树、render_overrides 拒绝、规范化。"""
@@ -2690,7 +2756,7 @@ class ViewsSchemaTest(SandboxTest):
         )
         before = tool.tree_json.read_text(encoding="utf-8")
         with self.assertRaises(ToolError) as ctx:
-            tool.view_add("other", under="apps", doc="docs/a.md")
+            tool.view_add("other", unders=["apps"], doc="docs/a.md")
         self.assertIn("二期功能，当前版本不支持", str(ctx.exception))
         self.assertEqual(tool.tree_json.read_text(encoding="utf-8"), before)  # 拒绝保持原子
         undo_ops, _ = tool.history_summary()
@@ -2721,7 +2787,7 @@ class ViewAddTest(ViewSandboxTest):
 
     def test_view_add_persists_config_and_renders_block(self):
         tool = self.make_view_tool(docs={"docs/ext.md": "# 扩展\n\n正文。\n"})
-        tool.view_add("ext", under="apps", doc="docs/ext.md")
+        tool.view_add("ext", unders=["apps"], doc="docs/ext.md")
         self.assertEqual(tool.load()["views"]["ext"], {
             "filter": {"op": "under", "path": "apps"},
             "docs": ["docs/ext.md"],
@@ -2745,47 +2811,47 @@ class ViewAddTest(ViewSandboxTest):
         for bad in ("Ext", "default", "-abc", "_abc", "a b", "a.b", "a" * 65, "", "中文"):
             with self.subTest(view_id=bad):
                 with self.assertRaises(ToolError):
-                    tool.view_add(bad, under="apps", doc="docs/a.md")
+                    tool.view_add(bad, unders=["apps"], doc="docs/a.md")
         self.assertNotIn("views", tool.load())  # 拒绝保持原子
         undo_ops, _ = tool.history_summary()
         self.assertEqual(undo_ops, [])
         for ok in ("a", "1", "a" * 64, "ext-2_0"):  # 合法边界：单字符、64 字符、连字符/下划线
             with self.subTest(view_id=ok):
-                tool.view_add(ok, under="apps", doc="docs/a.md")
+                tool.view_add(ok, unders=["apps"], doc="docs/a.md")
 
     def test_view_add_anchor_must_be_existing_dir(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
         with self.assertRaises(ToolError):
-            tool.view_add("v", under="nope", doc="docs/a.md")  # 不存在
+            tool.view_add("v", unders=["nope"], doc="docs/a.md")  # 不存在
         with self.assertRaises(ToolError):
-            tool.view_add("v", under="Cargo.toml", doc="docs/a.md")  # 文件条目
+            tool.view_add("v", unders=["Cargo.toml"], doc="docs/a.md")  # 文件条目
         with self.assertRaises(ToolError):
-            tool.view_add("v", under="apps/main.tsx", doc="docs/a.md")  # 深层文件条目
+            tool.view_add("v", unders=["apps/main.tsx"], doc="docs/a.md")  # 深层文件条目
         self.assertNotIn("views", tool.load())
 
     def test_view_add_requires_existing_doc(self):
         tool = self.make_view_tool()
         with self.assertRaises(ToolError):
-            tool.view_add("v", under="apps", doc="docs/missing.md")
+            tool.view_add("v", unders=["apps"], doc="docs/missing.md")
         self.assertNotIn("views", tool.load())
         self.assertFalse((tool.repo_root / "docs").exists())  # 不凭空创建文档/目录
 
     def test_line_requires_doc(self):
         tool = self.make_view_tool()
         with self.assertRaises(ToolError):
-            tool.view_add("v", under="apps", line=1)  # --line 依附 --doc
+            tool.view_add("v", unders=["apps"], line=1)  # --line 依附 --doc
         self.assertNotIn("views", tool.load())
 
     def test_view_add_without_doc_persists_config_only(self):
         tool = self.make_view_tool()
-        tool.view_add("v", under="apps")  # 配置先行：无绑定文档、无渲染产物
+        tool.view_add("v", unders=["apps"])  # 配置先行：无绑定文档、无渲染产物
         self.assertEqual(tool.load()["views"]["v"], {"filter": {"op": "under", "path": "apps"}})
 
     def test_view_add_does_not_touch_agents_md(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
         tool.render()  # 先渲染默认视图产物
         agents_before = tool.agents_md.read_text(encoding="utf-8")
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         self.assertEqual(tool.agents_md.read_text(encoding="utf-8"), agents_before)  # 数据未变，默认产物不动
 
 
@@ -2797,7 +2863,7 @@ class ViewBlockPlacementTest(ViewSandboxTest):
 
     def test_line_puts_fence_first_at_nth_line(self):
         tool = self.make_view_tool(docs={"docs/a.md": self.numbered_doc(20)})
-        tool.view_add("v", under="apps", doc="docs/a.md", line=8)
+        tool.view_add("v", unders=["apps"], doc="docs/a.md", line=8)
         lines = self.doc_text(tool, "docs/a.md").split("\n")
         self.assertEqual(lines[7], "```")  # 围栏首行落第 8 行（1-based）
         self.assertEqual(lines[8], view_tree_markers("v")[0])
@@ -2808,7 +2874,7 @@ class ViewBlockPlacementTest(ViewSandboxTest):
         # 承诺落点语义：原第 7 行（"第7行"）非空 → 带前导空行插在其前，fence 落第 8 行，
         # 原第 7 行内容完整后移到块（含下方空行）之后
         tool = self.make_view_tool(docs={"docs/a.md": self.numbered_doc(20)})
-        tool.view_add("v", under="apps", doc="docs/a.md", line=8)
+        tool.view_add("v", unders=["apps"], doc="docs/a.md", line=8)
         lines = self.doc_text(tool, "docs/a.md").split("\n")
         end_idx = lines.index(view_tree_markers("v")[1])
         self.assertEqual(lines[end_idx + 1], "```")
@@ -2820,7 +2886,7 @@ class ViewBlockPlacementTest(ViewSandboxTest):
         # 原第 N-1 行已是空行：直接插在当前第 N 行前，空行不叠加
         doc = "# 标题\n\n正文二\n\n正文四\n"  # 第 4 行已空，第 5 行 = 正文四
         tool = self.make_view_tool(docs={"docs/a.md": doc})
-        tool.view_add("v", under="apps", doc="docs/a.md", line=5)
+        tool.view_add("v", unders=["apps"], doc="docs/a.md", line=5)
         lines = self.doc_text(tool, "docs/a.md").split("\n")
         fence_idx = lines.index("```")
         self.assertEqual(lines[fence_idx], "```")
@@ -2835,7 +2901,7 @@ class ViewBlockPlacementTest(ViewSandboxTest):
         # 原第 N-1 行非空：插入序列带前导空行、插在其内容之前，fence 仍落第 N 行
         doc = "# 标题\n\n正文二\n正文三\n正文四\n"  # 第 3 行 = 正文二（非空），N=4
         tool = self.make_view_tool(docs={"docs/a.md": doc})
-        tool.view_add("v", under="apps", doc="docs/a.md", line=4)
+        tool.view_add("v", unders=["apps"], doc="docs/a.md", line=4)
         lines = self.doc_text(tool, "docs/a.md").split("\n")
         self.assertEqual(lines[3], "```")            # fence 落第 4 行（承诺落点）
         self.assertEqual(lines[2], "")               # 补的前导空行占第 3 行
@@ -2845,7 +2911,7 @@ class ViewBlockPlacementTest(ViewSandboxTest):
 
     def test_line_at_document_head(self):
         tool = self.make_view_tool(docs={"docs/a.md": self.numbered_doc(5)})
-        tool.view_add("v", under="apps", doc="docs/a.md", line=1)
+        tool.view_add("v", unders=["apps"], doc="docs/a.md", line=1)
         lines = self.doc_text(tool, "docs/a.md").split("\n")
         self.assertEqual(lines[0], "```")  # 第 1 行即围栏首行，上方无需空行
         self.assertEqual(lines[2], "Demo/")  # 块内剪影从全局根名开始
@@ -2861,13 +2927,13 @@ class ViewBlockPlacementTest(ViewSandboxTest):
         for bad in (0, -1, 12):  # 10 行文档 split 后 11 元素（末尾空行），合法上界 11
             with self.subTest(line=bad):
                 with self.assertRaises(ToolError):
-                    tool.view_add("v", under="apps", doc="docs/a.md", line=bad)
+                    tool.view_add("v", unders=["apps"], doc="docs/a.md", line=bad)
         self.assertNotIn("views", tool.load())
         self.assertEqual(self.doc_text(tool, "docs/a.md"), original)  # 文档原样
 
     def test_line_at_last_blank_line_allowed(self):
         tool = self.make_view_tool(docs={"docs/a.md": self.numbered_doc(10)})
-        tool.view_add("v", under="apps", doc="docs/a.md", line=11)  # 末尾空行元素位置
+        tool.view_add("v", unders=["apps"], doc="docs/a.md", line=11)  # 末尾空行元素位置
         lines = self.doc_text(tool, "docs/a.md").split("\n")
         self.assertEqual(lines[10], "```")  # fence 落第 11 行（承诺落点）
         end_idx = lines.index(view_tree_markers("v")[1])
@@ -2877,7 +2943,7 @@ class ViewBlockPlacementTest(ViewSandboxTest):
 
     def test_no_line_appends_to_tail(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n\n正文"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         lines = self.doc_text(tool, "docs/a.md").split("\n")
         begin, _end = view_tree_markers("v")
         b = lines.index(begin)
@@ -2939,19 +3005,22 @@ class ViewBlockHelpersTest(unittest.TestCase):
 
 
 class ViewSilhouetteTest(ViewSandboxTest):
-    """单锚点剪影渲染：骨架链只作容器、首行全局 root 名、hidden/collapsed 语义。"""
+    """剪影渲染契约：选中条目正常渲染、未选中祖先仅作路径骨架、首行全局 root 名、hidden/collapsed 语义。"""
 
     def silhouette(self, tool: TreeTool, *parts: str) -> str:
+        anchor = "/".join(parts)
+        tree = tool.load()["tree"]
         name, _custom = tool.current_root_name()
-        return render_silhouette(name, tool.load()["tree"], list(parts))
+        return render_silhouette(name, tree, select_under(tree, anchor))
 
     def test_single_anchor_silhouette(self):
+        # under 选中含锚点自身：apps 是选中条目、正常显示简介（T2 统一模型，不再是 T1 的纯骨架链）
         tool = self.make_view_tool()
         self.assertEqual(
             self.silhouette(tool, "apps"),
             "\n".join([
                 "Demo/",
-                "└── apps/",
+                "└── apps/ # 应用层",
                 "    ├── main.tsx # 入口",
                 "    └── ui/      # UI 组件",
                 "        ├── button.tsx # 按钮",
@@ -2960,39 +3029,41 @@ class ViewSilhouetteTest(ViewSandboxTest):
         )
 
     def test_deep_anchor_skeleton_chain(self):
+        # 深锚点：锚点自身选中显示简介，路径上的未选中祖先（apps）才是骨架、无简介
         tool = self.make_view_tool()
         self.assertEqual(
             self.silhouette(tool, "apps", "ui"),
             "\n".join([
                 "Demo/",
                 "└── apps/",
-                "    └── ui/",
+                "    └── ui/ # UI 组件",
                 "        ├── button.tsx # 按钮",
                 "        └── input.tsx  # 输入框",
             ]),
         )
 
-    def test_skeleton_dirs_hide_desc_but_subtree_keeps(self):
-        # 骨架目录只作容器：路径上目录的 desc 不渲染，锚点子树的 desc 正常渲染
+    def test_selected_entries_show_desc_skeletons_do_not(self):
+        # 骨架 = 未选中的祖先目录：只作容器不显示简介；选中条目（含锚点自身）显示简介
         shallow = self.silhouette(self.make_view_tool(), "apps")
-        self.assertNotIn("应用层", shallow)  # 锚点是骨架终点，不显示简介
-        self.assertIn("UI 组件", shallow)    # 锚点子树内的目录正常渲染
+        self.assertIn("应用层", shallow)   # 锚点自身在选中集中，显示简介
+        self.assertIn("UI 组件", shallow)  # 子树目录也在选中集中
         deep = self.silhouette(self.make_view_tool(), "apps", "ui")
-        self.assertNotIn("应用层", deep)
-        self.assertNotIn("UI 组件", deep)    # 深锚点时 ui 也是骨架
+        self.assertNotIn("应用层", deep)   # apps 未选中，是骨架
+        self.assertIn("UI 组件", deep)     # ui 锚点选中，显示简介
         self.assertIn("按钮", deep)
 
     def test_first_line_is_global_root_name(self):
         tool = self.make_view_tool()
-        self.assertTrue(render_silhouette("AnyRoot", tool.load()["tree"], ["apps"]).startswith("AnyRoot/"))
+        tree = tool.load()["tree"]
+        self.assertTrue(render_silhouette("AnyRoot", tree, select_under(tree, "apps")).startswith("AnyRoot/"))
         tool.set_root("Fixed")
         name, _ = tool.current_root_name()
-        self.assertTrue(render_silhouette(name, tool.load()["tree"], ["apps"]).startswith("Fixed/"))
+        self.assertTrue(render_silhouette(name, tree, select_under(tree, "apps")).startswith("Fixed/"))
 
     def test_view_block_uses_global_root_name(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
         tool.set_root("Fixed")
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         text = self.doc_text(tool, "docs/a.md")
         begin, end = view_tree_markers("v")
         block = text[text.index(begin):text.index(end)]
@@ -3002,7 +3073,8 @@ class ViewSilhouetteTest(ViewSandboxTest):
         data = make_view_data()
         data["tree"]["apps"]["children"]["main.tsx"]["hidden"] = True
         tool = self.make_tool(data=data)
-        out = render_silhouette("Demo", tool.load()["tree"], ["apps"])
+        tree = tool.load()["tree"]
+        out = render_silhouette("Demo", tree, select_under(tree, "apps"))
         self.assertNotIn("main.tsx", out)
         self.assertIn("ui/", out)  # 其余照常
 
@@ -3010,16 +3082,380 @@ class ViewSilhouetteTest(ViewSandboxTest):
         data = make_view_data()
         data["tree"]["apps"]["hidden"] = True
         tool = self.make_tool(data=data)
-        self.assertEqual(render_silhouette("Demo", tool.load()["tree"], ["apps"]), "Demo/")
-        self.assertEqual(render_silhouette("Demo", tool.load()["tree"], ["apps", "ui"]), "Demo/")
+        tree = tool.load()["tree"]
+        self.assertEqual(render_silhouette("Demo", tree, select_under(tree, "apps")), "Demo/")
+        self.assertEqual(render_silhouette("Demo", tree, select_under(tree, "apps/ui")), "Demo/")
 
     def test_collapsed_in_subtree_still_folds(self):
         data = make_view_data()
         data["tree"]["apps"]["children"]["ui"]["collapsed"] = True
         tool = self.make_tool(data=data)
-        out = render_silhouette("Demo", tool.load()["tree"], ["apps"])
+        tree = tool.load()["tree"]
+        out = render_silhouette("Demo", tree, select_under(tree, "apps"))
         self.assertIn("ui/…", out)
         self.assertNotIn("button.tsx", out)
+
+
+class FilterShortcutCompileTest(FilterSandboxTest):
+    """CLI 快捷参数编译契约：多锚点并集(or)、锚点×标签交集(and)、排除差集(and+not)，落盘为规范表达式树。"""
+
+    def persisted_filter(self, tool: TreeTool, view_id: str) -> dict:
+        return tool.load()["views"][view_id]["filter"]
+
+    def test_single_anchor_compiles_to_bare_under(self):
+        # T1 兼容：单锚点无其他维度 = 裸 under 节点（与既有落盘形态逐字节一致）
+        tool = self.make_filter_tool()
+        tool.view_add("v", unders=["apps"])
+        self.assertEqual(self.persisted_filter(tool, "v"), {"op": "under", "path": "apps"})
+
+    def test_multiple_anchors_compile_to_or_union(self):
+        # 多锚点为并集：or 包裹；组内排序去重（与 CLI 给出顺序无关的确定性产物）
+        tool = self.make_filter_tool()
+        tool.view_add("v", unders=["docs", "apps"])
+        tool.view_add("w", unders=["apps", "docs", "apps"])  # 重复与乱序同样收敛
+        self.assertEqual(self.persisted_filter(tool, "v"), {
+            "op": "or",
+            "children": [
+                {"op": "under", "path": "apps"},
+                {"op": "under", "path": "docs"},
+            ],
+        })
+        self.assertEqual(self.persisted_filter(tool, "v"), self.persisted_filter(tool, "w"))
+
+    def test_anchor_times_tags_compile_to_and(self):
+        tool = self.make_filter_tool()
+        tool.view_add("v", unders=["apps"], tags=["doc"])
+        self.assertEqual(self.persisted_filter(tool, "v"), {
+            "op": "and",
+            "children": [
+                {"op": "under", "path": "apps"},
+                {"op": "tag", "tag": "doc"},
+            ],
+        })
+
+    def test_tags_only_compile_to_bare_or_and(self):
+        # 仅标签（无锚点）：单标签退化为裸 tag 节点，多标签同为交集
+        tool = self.make_filter_tool()
+        tool.view_add("v", tags=["doc"])
+        self.assertEqual(self.persisted_filter(tool, "v"), {"op": "tag", "tag": "doc"})
+        tool.view_add("w", tags=["misc", "doc"])
+        self.assertEqual(self.persisted_filter(tool, "w"), {
+            "op": "and",
+            "children": [
+                {"op": "tag", "tag": "doc"},
+                {"op": "tag", "tag": "misc"},
+            ],
+        })
+
+    def test_excludes_compile_to_and_not(self):
+        # 排除差集：and + not(under)
+        tool = self.make_filter_tool()
+        tool.view_add("v", unders=["apps"], excludes=["apps/ui"])
+        self.assertEqual(self.persisted_filter(tool, "v"), {
+            "op": "and",
+            "children": [
+                {"op": "under", "path": "apps"},
+                {"op": "not", "child": {"op": "under", "path": "apps/ui"}},
+            ],
+        })
+
+    def test_full_combination_canonical_order(self):
+        # 规范 children 顺序：锚点（多锚点 or 包裹）→ 标签 → 排除（not 包裹）；各组内按确定性排序
+        tool = self.make_filter_tool()
+        tool.view_add("v", unders=["docs", "apps"], tags=["misc", "doc"], excludes=["docs", "apps/ui"])
+        self.assertEqual(self.persisted_filter(tool, "v"), {
+            "op": "and",
+            "children": [
+                {"op": "or", "children": [
+                    {"op": "under", "path": "apps"},
+                    {"op": "under", "path": "docs"},
+                ]},
+                {"op": "tag", "tag": "doc"},
+                {"op": "tag", "tag": "misc"},
+                {"op": "not", "child": {"op": "under", "path": "apps/ui"}},
+                {"op": "not", "child": {"op": "under", "path": "docs"}},
+            ],
+        })
+
+    def test_handwritten_equivalent_expression_persists_identically(self):
+        # 手写等价（规范形态）表达式与快捷参数编译产物：落盘结果逐字节相同
+        shortcut = self.make_filter_tool()
+        shortcut.view_add("v", unders=["docs", "apps"], tags=["doc"], excludes=["apps/ui"])
+        handwritten = {
+            "op": "and",
+            "children": [
+                {"op": "or", "children": [
+                    {"op": "under", "path": "apps"},
+                    {"op": "under", "path": "docs"},
+                ]},
+                {"op": "tag", "tag": "doc"},
+                {"op": "not", "child": {"op": "under", "path": "apps/ui"}},
+            ],
+        }
+        manual = self.make_filter_tool()
+        manual.view_add("v", filt=handwritten)
+        self.assertEqual(
+            shortcut.tree_json.read_text(encoding="utf-8"),
+            manual.tree_json.read_text(encoding="utf-8"),
+        )
+
+    def test_filter_source_mutex(self):
+        tool = self.make_filter_tool()
+        with self.assertRaises(ToolError):
+            tool.view_add("v", unders=["apps"], filt={"op": "tag", "tag": "doc"})
+        with self.assertRaises(ToolError):
+            tool.view_add("v", tags=["doc"], excludes=["docs"], filt={"op": "tag", "tag": "core"})
+        self.assertNotIn("views", tool.load())  # 拒绝保持原子
+
+    def test_no_scope_source_rejected(self):
+        # 快捷参数至少要一个范围来源（--under 或 --tag）：纯排除/空参数拒绝
+        tool = self.make_filter_tool()
+        with self.assertRaises(ToolError):
+            tool.view_add("v", excludes=["apps"])
+        with self.assertRaises(ToolError):
+            tool.view_add("v")
+        self.assertNotIn("views", tool.load())
+
+
+class ViewFilterValidationTest(FilterSandboxTest):
+    """引用预检契约：under 引用不存在的路径、tag 引用未登记标签 → view-add 拒绝且原子。"""
+
+    def test_under_ref_must_exist_in_tree(self):
+        tool = self.make_filter_tool(docs={"docs/a.md": "# A\n"})
+        before = tool.tree_json.read_text(encoding="utf-8")
+        doc_before = self.doc_text(tool, "docs/a.md")
+        for bad in ("nope", "apps/ghost.tsx"):
+            with self.subTest(under=bad):
+                with self.assertRaises(ToolError):
+                    tool.view_add("v", unders=[bad], doc="docs/a.md")
+        self.assertNotIn("views", tool.load())                              # 不落盘
+        self.assertEqual(tool.tree_json.read_text(encoding="utf-8"), before)
+        self.assertEqual(self.doc_text(tool, "docs/a.md"), doc_before)      # 文档不动
+        undo_ops, _ = tool.history_summary()
+        self.assertEqual(undo_ops, [])                                      # 不留撤销历史
+
+    def test_under_ref_must_be_dir_entry(self):
+        # 文件条目不是合法锚点（under 为目录锚点前缀语义）
+        tool = self.make_filter_tool(docs={"docs/a.md": "# A\n"})
+        for bad in ("Cargo.toml", "apps/main.tsx"):
+            with self.subTest(under=bad):
+                with self.assertRaises(ToolError):
+                    tool.view_add("v", unders=[bad], doc="docs/a.md")
+        self.assertNotIn("views", tool.load())
+
+    def test_under_ref_checked_anywhere_in_expression(self):
+        # 嵌套表达式深处的悬空引用同样拒绝（清单承载的任意组合走同一预检）
+        tool = self.make_filter_tool()
+        expr = {"op": "or", "children": [
+            {"op": "under", "path": "apps"},
+            {"op": "not", "child": {"op": "under", "path": "ghost"}},
+        ]}
+        with self.assertRaises(ToolError):
+            tool.view_add("v", filt=expr)
+        self.assertNotIn("views", tool.load())
+
+    def test_exclude_ref_validated_too(self):
+        # 排除项编译为 not(under) 后同样过引用预检
+        tool = self.make_filter_tool()
+        with self.assertRaises(ToolError):
+            tool.view_add("v", unders=["apps"], excludes=["ghost"])
+        self.assertNotIn("views", tool.load())
+
+    def test_tag_ref_must_be_registered(self):
+        tool = self.make_filter_tool()
+        with self.assertRaises(ToolError):
+            tool.view_add("v", tags=["unknown-tag"])
+        self.assertNotIn("views", tool.load())
+
+    def test_tag_ref_checked_in_nested_expression(self):
+        tool = self.make_filter_tool()
+        expr = {"op": "and", "children": [
+            {"op": "under", "path": "apps"},
+            {"op": "not", "child": {"op": "tag", "tag": "ghost"}},
+        ]}
+        with self.assertRaises(ToolError):
+            tool.view_add("v", filt=expr)
+        self.assertNotIn("views", tool.load())
+
+
+class ViewFilterEvalTest(FilterSandboxTest):
+    """求值引擎契约（经 view-add 渲染到文档观测）：五种节点语义、not 全量补集、任意嵌套。"""
+
+    def test_tag_selects_disconnected_entries(self):
+        # tag doc 选中：根散文件 README + apps/ui 深处两文件 + docs/guide.md——不连通集合
+        tool = self.make_filter_tool(docs={"docs/v.md": "# V\n"})
+        tool.view_add("v", tags=["doc"], doc="docs/v.md")
+        block = self.rendered_block(tool, "v", "docs/v.md")
+        self.assertIn("README.md # 说明", block)
+        self.assertIn("guide.md # 指南", block)
+        self.assertIn("button.tsx # 按钮", block)
+        self.assertIn("input.tsx  # 输入框", block)  # 列对齐：与 button.tsx 行按最宽 stem 对齐
+        self.assertNotIn("main.tsx", block)   # core 标签不选
+        self.assertNotIn("Cargo.toml", block) # 无标签不选
+
+    def test_and_intersects_anchor_and_tag(self):
+        tool = self.make_filter_tool(docs={"docs/v.md": "# V\n"})
+        tool.view_add("v", filt={"op": "and", "children": [
+            {"op": "under", "path": "apps"},
+            {"op": "tag", "tag": "doc"},
+        ]}, doc="docs/v.md")
+        block = self.rendered_block(tool, "v", "docs/v.md")
+        self.assertIn("button.tsx", block)
+        self.assertIn("input.tsx", block)
+        self.assertNotIn("main.tsx", block)  # apps 内但无 doc 标签
+        self.assertNotIn("guide.md", block)  # 有 doc 标签但不在 apps 下
+        self.assertNotIn("README.md", block)
+
+    def test_or_unions_anchor_and_tag(self):
+        tool = self.make_filter_tool(docs={"docs/v.md": "# V\n"})
+        tool.view_add("v", filt={"op": "or", "children": [
+            {"op": "under", "path": "docs"},
+            {"op": "tag", "tag": "core"},
+        ]}, doc="docs/v.md")
+        block = self.rendered_block(tool, "v", "docs/v.md")
+        self.assertIn("guide.md", block)
+        self.assertIn("main.tsx", block)
+        self.assertNotIn("button.tsx", block)
+        self.assertNotIn("README.md", block)
+
+    def test_not_is_complement_over_full_data(self):
+        # not(under apps) = 全量条目（含根散文件与目录）减 apps 子树
+        tool = self.make_filter_tool(docs={"docs/v.md": "# V\n"})
+        tool.view_add("v", filt={"op": "not", "child": {"op": "under", "path": "apps"}}, doc="docs/v.md")
+        block = self.rendered_block(tool, "v", "docs/v.md")
+        self.assertIn("Cargo.toml # 根配置", block)
+        self.assertIn("README.md  # 说明", block)  # 列对齐：Cargo.toml 行更宽，README 补两空格
+        self.assertIn("guide.md # 指南", block)
+        self.assertIn("# 文档目录", block)  # docs 目录自身在补集中（选中显示简介）
+        self.assertNotIn("main.tsx", block)
+        self.assertNotIn("button.tsx", block)
+
+    def test_nested_combination(self):
+        # and(or(under apps, under docs), not(tag core))：两目录内除 core 条目外的全部
+        tool = self.make_filter_tool(docs={"docs/v.md": "# V\n"})
+        tool.view_add("v", filt={"op": "and", "children": [
+            {"op": "or", "children": [
+                {"op": "under", "path": "apps"},
+                {"op": "under", "path": "docs"},
+            ]},
+            {"op": "not", "child": {"op": "tag", "tag": "core"}},
+        ]}, doc="docs/v.md")
+        block = self.rendered_block(tool, "v", "docs/v.md")
+        self.assertIn("button.tsx", block)
+        self.assertIn("input.tsx", block)
+        self.assertIn("guide.md", block)
+        self.assertIn("ui/", block)
+        self.assertNotIn("main.tsx", block)   # core 被 not 排除
+        self.assertNotIn("README.md", block)  # 两目录之外
+        self.assertNotIn("Cargo.toml", block)
+
+    def test_shortcut_exclusion_renders_as_difference(self):
+        # 快捷差集端到端：apps 减 apps/ui 只剩 main.tsx（apps 选中显示简介）
+        tool = self.make_filter_tool(docs={"docs/v.md": "# V\n"})
+        tool.view_add("v", unders=["apps"], excludes=["apps/ui"], doc="docs/v.md")
+        block = self.rendered_block(tool, "v", "docs/v.md")
+        self.assertIn("apps/ # 应用层", block)
+        self.assertIn("main.tsx # 入口", block)
+        self.assertNotIn("ui/", block)
+
+    def test_empty_selection_warns_but_persists(self):
+        # 选中 0 条：告警放行、配置落盘、渲染仅剩根名行（check 的空选中告警归后续票）
+        import io
+        from contextlib import redirect_stdout
+
+        tool = self.make_filter_tool(docs={"docs/v.md": "# V\n"})
+        expr = {"op": "and", "children": [
+            {"op": "under", "path": "apps"},
+            {"op": "tag", "tag": "misc"},  # 无条目同时满足两条件
+        ]}
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            tool.view_add("v", filt=expr, doc="docs/v.md")
+        self.assertIn("警告", buf.getvalue())
+        self.assertIn("0 条", buf.getvalue())
+        self.assertEqual(tool.load()["views"]["v"]["filter"], expr)
+        self.assertEqual(self.rendered_block(tool, "v", "docs/v.md").strip(), "Demo/")
+
+
+class ViewSilhouetteProjectionTest(FilterSandboxTest):
+    """不连通选中集的剪影投影：选中投回全树结构、骨架祖先只作容器、空集/hidden/collapsed 形态。"""
+
+    def render(self, tool: TreeTool, selected: set[str], root: str = "Demo") -> str:
+        return render_silhouette(root, tool.load()["tree"], selected)
+
+    def test_disconnected_mix_of_files_and_dirs(self):
+        # 散文件（README）+ 多目录深处文件（ui 下两条）+ 子目录文件（guide.md）混合投影
+        tool = self.make_filter_tool()
+        selected = {"apps/ui/button.tsx", "apps/ui/input.tsx", "docs/guide.md", "README.md"}
+        self.assertEqual(
+            self.render(tool, selected),
+            "\n".join([
+                "Demo/",
+                "├── apps/",  # 骨架：无简介
+                "│   └── ui/",  # 骨架
+                "│       ├── button.tsx # 按钮",
+                "│       └── input.tsx  # 输入框",
+                "├── docs/",
+                "│   └── guide.md # 指南",
+                "└── README.md # 说明",
+            ]),
+        )
+
+    def test_selected_dir_without_selected_children_has_no_subblock(self):
+        # 选中目录（如被 tag 选中）但其子条目不在选中集：目录行显示简介、无子块
+        tool = self.make_filter_tool()
+        selected = {"docs", "apps/ui/button.tsx"}
+        out = self.render(tool, selected)
+        self.assertIn("docs/ # 文档目录", out)
+        self.assertNotIn("# 应用层", out)  # apps 未选中是骨架，无简介
+        self.assertNotIn("guide.md", out)  # docs 的子不在选中集
+        self.assertNotIn("input.tsx", out)
+
+    def test_hidden_selected_entries_skipped(self):
+        # hidden 选中条目不出现（渲染层统一跳过，隐藏覆盖选中）
+        data = make_filter_data()
+        data["tree"]["README.md"]["hidden"] = True
+        data["tree"]["docs"]["children"]["guide.md"]["hidden"] = True
+        tool = self.make_tool(data=data)
+        tree = tool.load()["tree"]
+        out = render_silhouette("Demo", tree, {"README.md", "docs", "docs/guide.md"})
+        self.assertNotIn("README.md", out)
+        self.assertNotIn("guide.md", out)
+        self.assertIn("docs/ # 文档目录", out)  # docs 自身未 hidden 照常渲染
+
+    def test_hidden_skeleton_ancestor_hides_whole_branch(self):
+        # T1 语义保持：骨架链上的 hidden 祖先 → 该分支整体不出现
+        data = make_filter_data()
+        data["tree"]["apps"]["hidden"] = True
+        tool = self.make_tool(data=data)
+        tree = tool.load()["tree"]
+        out = render_silhouette("Demo", tree, {"apps/ui/button.tsx", "docs/guide.md"})
+        self.assertNotIn("apps", out)
+        self.assertIn("guide.md", out)
+
+    def test_empty_selection_renders_root_only(self):
+        tool = self.make_filter_tool()
+        self.assertEqual(self.render(tool, set()), "Demo/")
+
+    def test_collapsed_selected_dir_folds(self):
+        # 选中目录 collapsed 生效：折叠不展开（与简版树同语义）
+        data = make_filter_data()
+        data["tree"]["apps"]["children"]["ui"]["collapsed"] = True
+        tool = self.make_tool(data=data)
+        tree = tool.load()["tree"]
+        out = render_silhouette("Demo", tree, select_under(tree, "apps"))
+        self.assertIn("ui/…", out)
+        self.assertNotIn("button.tsx", out)
+
+    def test_skeleton_dir_never_folds(self):
+        # 骨架目录忽略 collapsed：必须展开到选中后代（折叠会让剪影丢内容）
+        data = make_filter_data()
+        data["tree"]["apps"]["collapsed"] = True
+        tool = self.make_tool(data=data)
+        tree = tool.load()["tree"]
+        out = render_silhouette("Demo", tree, {"apps/ui/button.tsx"})
+        self.assertIn("button.tsx", out)
+        self.assertNotIn("apps/…", out)
 
 
 class ViewUpsertTest(ViewSandboxTest):
@@ -3027,8 +3463,8 @@ class ViewUpsertTest(ViewSandboxTest):
 
     def test_upsert_changes_filter_and_refreshes_block(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
-        tool.view_add("v", under="apps/ui", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
+        tool.view_add("v", unders=["apps/ui"], doc="docs/a.md")
         self.assertEqual(tool.load()["views"]["v"]["filter"], {"op": "under", "path": "apps/ui"})
         text = self.doc_text(tool, "docs/a.md")
         begin, _end = view_tree_markers("v")
@@ -3039,10 +3475,10 @@ class ViewUpsertTest(ViewSandboxTest):
     def test_upsert_relocates_block(self):
         # 重定位语义：以删除旧块后的文档为基准，围栏首行落基准第 N 行
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n\n" + "\n".join(f"L{i}" for i in range(1, 21)) + "\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md", line=2)
+        tool.view_add("v", unders=["apps"], doc="docs/a.md", line=2)
         begin, _end = view_tree_markers("v")
         self.assertEqual(self.doc_text(tool, "docs/a.md").split("\n").count(begin), 1)
-        tool.view_add("v", under="apps", doc="docs/a.md", line=15)
+        tool.view_add("v", unders=["apps"], doc="docs/a.md", line=15)
         text = self.doc_text(tool, "docs/a.md")
         self.assertEqual(text.count(begin), 1)
         self.assertEqual(text.split("\n")[14], "```")  # 基准第 15 行 = 围栏首行
@@ -3050,9 +3486,9 @@ class ViewUpsertTest(ViewSandboxTest):
     def test_upsert_relocates_without_line_keeps_position(self):
         # 块已存在且未给 --line：原地替换内容，位置不动
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n\nL1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md", line=3)
+        tool.view_add("v", unders=["apps"], doc="docs/a.md", line=3)
         before_fence = self.doc_text(tool, "docs/a.md").split("\n").index("```")
-        tool.view_add("v", under="apps/ui", doc="docs/a.md")
+        tool.view_add("v", unders=["apps/ui"], doc="docs/a.md")
         lines = self.doc_text(tool, "docs/a.md").split("\n")
         self.assertEqual(lines.index("```"), before_fence)  # 位置不变
         self.assertNotIn("main.tsx", "\n".join(lines))       # 内容已刷新
@@ -3060,8 +3496,8 @@ class ViewUpsertTest(ViewSandboxTest):
     def test_upsert_replaces_docs_keeps_old_block(self):
         # 换绑定文档：配置清单替换；旧文档的块保留（孤儿块清理归 view-rm --purge / check）
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
-        tool.view_add("v", under="apps", doc="docs/b.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/b.md")
         self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/b.md"])
         begin, _end = view_tree_markers("v")
         self.assertIn(begin, self.doc_text(tool, "docs/a.md"))  # 旧块保留不删
@@ -3076,7 +3512,7 @@ class ViewDocMirrorTest(ViewSandboxTest):
         return block_content(self.doc_text(tool, rel), begin, end)
 
     def bind_two(self, tool: TreeTool) -> None:
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         tool.view_doc("v", add="docs/b.md")
 
     def test_view_doc_add_mirrors_same_block_content(self):
@@ -3104,7 +3540,7 @@ class ViewDocMirrorTest(ViewSandboxTest):
         # --line 语义与 view-add 完全一致：围栏首行承诺落点、上下空行保证
         doc = "# 标题\n\n" + "\n".join(f"L{i}" for i in range(1, 16)) + "\n"
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": doc})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         tool.view_doc("v", add="docs/b.md", line=4)
         lines = self.doc_text(tool, "docs/b.md").split("\n")
         self.assertEqual(lines[3], "```")  # 围栏首行落第 4 行（承诺落点）
@@ -3123,7 +3559,7 @@ class ViewDocMirrorTest(ViewSandboxTest):
     def test_view_doc_add_line_out_of_range_rejected(self):
         doc = "# B\n\nL1\nL2\nL3\n"
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": doc})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         with self.assertRaises(ToolError):
             tool.view_doc("v", add="docs/b.md", line=99)
         self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md"])  # 拒绝保持原子
@@ -3132,7 +3568,7 @@ class ViewDocMirrorTest(ViewSandboxTest):
     def test_view_doc_add_reactivates_orphan_block_in_place(self):
         # 解绑后再重新绑定：孤儿块原地激活（内容刷新为当前渲染产物，位置保留）
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         tool.view_doc("v", add="docs/b.md")
         tool.view_doc("v", rm="docs/a.md")  # a 解绑，块保留为孤儿
         begin, _end = view_tree_markers("v")
@@ -3152,7 +3588,7 @@ class ViewDocAddTest(ViewSandboxTest):
 
     def make_bound(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         return tool
 
     def test_rejects_duplicate_binding(self):
@@ -3185,7 +3621,7 @@ class ViewDocAddTest(ViewSandboxTest):
     def test_add_to_config_only_view(self):
         # 配置先行的视图（view-add 未给 --doc）可后补绑定文档
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
-        tool.view_add("v", under="apps")
+        tool.view_add("v", unders=["apps"])
         self.assertNotIn("docs", tool.load()["views"]["v"])
         tool.view_doc("v", add="docs/a.md")
         self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md"])
@@ -3210,7 +3646,7 @@ class ViewDocRmTest(ViewSandboxTest):
         return block_content(self.doc_text(tool, rel), begin, end)
 
     def bind_two(self, tool: TreeTool) -> None:
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         tool.view_doc("v", add="docs/b.md")
 
     def test_rm_unbinds_and_keeps_block(self):
@@ -3269,7 +3705,7 @@ class ViewDocRmTest(ViewSandboxTest):
     def test_rm_last_doc_yields_config_only(self):
         # 解绑最后一个文档：视图退化为配置先行（空 docs 省略键），块保留
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         tool.view_doc("v", rm="docs/a.md")
         self.assertEqual(tool.load()["views"]["v"], {"filter": {"op": "under", "path": "apps"}})
         self.assertIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/a.md"))
@@ -3290,7 +3726,7 @@ class ViewDocPathologyTest(ViewSandboxTest):
     def test_multi_block_rejects_view_doc_add_atomically(self):
         # 病态文档已在绑定清单中：--add 新文档的 dry-run 覆盖全清单，落盘前拦截
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         self.duplicate_block(tool, "docs/a.md", "v")
         with self.assertRaises(ToolError) as ctx:
             tool.view_doc("v", add="docs/b.md")
@@ -3304,10 +3740,10 @@ class ViewDocPathologyTest(ViewSandboxTest):
 
     def test_multi_block_rejects_view_add_upsert(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         self.duplicate_block(tool, "docs/a.md", "v")
         with self.assertRaises(ToolError) as ctx:
-            tool.view_add("v", under="apps/ui", doc="docs/a.md")  # upsert 重定位/改锚点
+            tool.view_add("v", unders=["apps/ui"], doc="docs/a.md")  # upsert 重定位/改锚点
         msg = str(ctx.exception)
         self.assertIn("docs/a.md", msg)
         self.assertIn("2", msg)
@@ -3317,7 +3753,7 @@ class ViewDocPathologyTest(ViewSandboxTest):
         # 数据命令：写入成功在前、渲染在后——病态阻断渲染报错，数据已落盘；
         # 手改修复病态后重跑 render 即恢复（不做猜测性修复）
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         self.duplicate_block(tool, "docs/a.md", "v")
         import types
 
@@ -3345,7 +3781,7 @@ class ViewDocPathologyTest(ViewSandboxTest):
 
     def test_multi_block_rejects_render_command(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         self.duplicate_block(tool, "docs/a.md", "v")
         with self.assertRaises(ToolError) as ctx:
             tool.render()
@@ -3360,7 +3796,7 @@ class ViewDocUndoTest(ViewSandboxTest):
     def test_view_doc_add_single_history_step_and_undo(self):
         original_b = "# B\n\n正文段落。\n"
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": original_b})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         tool.view_doc("v", add="docs/b.md", line=2)
         undo_ops, _ = tool.history_summary()
         self.assertEqual(len(undo_ops), 2)
@@ -3371,7 +3807,7 @@ class ViewDocUndoTest(ViewSandboxTest):
 
     def test_view_doc_add_redo_roundtrip(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         tool.view_doc("v", add="docs/b.md", line=2)
         after = self.doc_text(tool, "docs/b.md")
         tool.undo()
@@ -3382,7 +3818,7 @@ class ViewDocUndoTest(ViewSandboxTest):
     def test_undo_view_doc_rm_rebinds_and_refreshes(self):
         # 撤销 --rm：清单恢复，解绑时保留的孤儿块重新入镜像刷新（漂移被纠正）
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         tool.view_doc("v", add="docs/b.md")
         tool.view_doc("v", rm="docs/b.md")
         begin, end = view_tree_markers("v")
@@ -3402,7 +3838,7 @@ class ViewDocUndoTest(ViewSandboxTest):
     def test_redo_view_doc_rm_keeps_orphan_block(self):
         # 重做 --rm：清单再次移除，文档中的块保留为孤儿
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         tool.view_doc("v", add="docs/b.md")
         tool.view_doc("v", rm="docs/b.md")
         tool.undo()
@@ -3411,12 +3847,12 @@ class ViewDocUndoTest(ViewSandboxTest):
         self.assertIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/b.md"))  # 块保留
 
 
-class ViewListTest(ViewSandboxTest):
+class ViewListTest(FilterSandboxTest):
     """view-list：id / 过滤器摘要 / 绑定文档数 / 块存在情况。"""
 
     def test_list_shows_summary(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         views = tool.view_list()
         self.assertEqual(len(views), 1)
         v = views[0]
@@ -3428,18 +3864,25 @@ class ViewListTest(ViewSandboxTest):
 
     def test_list_reports_missing_block(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         self.write_doc(tool, "docs/a.md", "# A\n")  # 模拟块被手删
         v = tool.view_list()[0]
         self.assertFalse(v["docs"][0]["block"])
 
     def test_list_sorted_by_id_and_empty(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
-        tool.view_add("zeta", under="apps", doc="docs/a.md")
-        tool.view_add("alpha", under="apps")
+        tool.view_add("zeta", unders=["apps"], doc="docs/a.md")
+        tool.view_add("alpha", unders=["apps"])
         self.assertEqual([v["id"] for v in tool.view_list()], ["alpha", "zeta"])
         empty = self.make_tool()
         self.assertEqual(empty.view_list(), [])
+
+    def test_compiled_filter_summary_readable(self):
+        # 编译产物的摘要能概括锚点/标签/布尔结构（可读单行）
+        tool = self.make_filter_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", unders=["docs", "apps"], tags=["doc"], excludes=["apps/ui"], doc="docs/a.md")
+        summary = tool.view_list()[0]["filter"]
+        self.assertEqual(summary, "and(or(under apps, under docs), tag doc, not(under apps/ui))")
 
 
 class ViewUndoTest(ViewSandboxTest):
@@ -3447,7 +3890,7 @@ class ViewUndoTest(ViewSandboxTest):
 
     def test_view_add_single_history_step(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         undo_ops, redo_ops = tool.history_summary()
         self.assertEqual((len(undo_ops), redo_ops), (1, []))
         self.assertIn("view-add", undo_ops[0])
@@ -3455,7 +3898,7 @@ class ViewUndoTest(ViewSandboxTest):
     def test_undo_restores_config_and_document(self):
         original = "# A\n\n正文段落。\n"
         tool = self.make_view_tool(docs={"docs/a.md": original})
-        tool.view_add("v", under="apps", doc="docs/a.md", line=2)
+        tool.view_add("v", unders=["apps"], doc="docs/a.md", line=2)
         self.assertIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/a.md"))
         op = tool.undo()
         self.assertIn("view-add", op)
@@ -3464,7 +3907,7 @@ class ViewUndoTest(ViewSandboxTest):
 
     def test_redo_restores_view_and_block_position(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n\n" + "\n".join(f"L{i}" for i in range(1, 16)) + "\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md", line=5)
+        tool.view_add("v", unders=["apps"], doc="docs/a.md", line=5)
         after = self.doc_text(tool, "docs/a.md")
         tool.undo()
         tool.redo()
@@ -3473,8 +3916,8 @@ class ViewUndoTest(ViewSandboxTest):
 
     def test_undo_only_last_view_add(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
-        tool.view_add("a1", under="apps", doc="docs/a.md")
-        tool.view_add("b1", under="apps/ui", doc="docs/b.md")
+        tool.view_add("a1", unders=["apps"], doc="docs/a.md")
+        tool.view_add("b1", unders=["apps/ui"], doc="docs/b.md")
         tool.undo()  # 仅撤销 b1
         views = tool.load().get("views", {})
         self.assertEqual(list(views), ["a1"])
@@ -3484,7 +3927,7 @@ class ViewUndoTest(ViewSandboxTest):
     def test_data_change_undo_refreshes_view_blocks(self):
         # 视图存在时，数据命令的 undo/redo 联动刷新视图块（自动渲染含全部视图）
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         import types
 
         args = types.SimpleNamespace(
@@ -3508,7 +3951,7 @@ class ViewsCompatTest(ViewSandboxTest):
 
     def test_default_view_renders_alongside_views(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         updated = tool.render()
         self.assertIn(tool.agents_md, updated)      # 默认视图照常（AGENTS.md 此前未渲染）
         self.assertIn("├── apps/      # 应用层", tool.agents_md.read_text(encoding="utf-8"))
@@ -3517,7 +3960,7 @@ class ViewsCompatTest(ViewSandboxTest):
     def test_dangling_anchor_render_skips_without_crash(self):
         # 锚点悬空（数据操作合法产物）时渲染跳过该视图，不炸整条渲染管线
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         before = self.doc_text(tool, "docs/a.md")
         tool.rm("apps")  # 锚点悬空
         tool.render()    # 不抛错
@@ -3525,34 +3968,100 @@ class ViewsCompatTest(ViewSandboxTest):
 
     def test_missing_bound_doc_render_skips(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         (tool.repo_root / "docs" / "a.md").unlink()  # 绑定文档被删
         tool.render()  # 不抛错、不凭空重建文档
         self.assertFalse((tool.repo_root / "docs" / "a.md").exists())
 
 
-class CmdViewTest(ViewSandboxTest):
-    """CLI 层 view-add / view-list：参数接线与输出。"""
+class CmdViewTest(FilterSandboxTest):
+    """CLI 层 view-add / view-list：参数接线（快捷参数/清单文件）与输出。"""
 
     def test_cmd_view_add_wires_args(self):
         import io
         import types
         from contextlib import redirect_stdout
 
-        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
-        args = types.SimpleNamespace(view_id="v", under="apps", doc="docs/a.md", line=None)
+        tool = self.make_filter_tool(docs={"docs/a.md": "# A\n"})
+        args = types.SimpleNamespace(
+            view_id="v", under=["apps"], tag=None, exclude=None, filter=None, doc="docs/a.md", line=None,
+        )
         buf = io.StringIO()
         with redirect_stdout(buf):
             _cmd_view_add(tool, args)
-        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md"])
+        self.assertEqual(tool.load()["views"]["v"]["filter"], {"op": "under", "path": "apps"})
         self.assertIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/a.md"))
         self.assertIn("v", buf.getvalue())
+
+    def test_cmd_view_add_wires_shortcut_combo(self):
+        import types
+
+        tool = self.make_filter_tool(docs={"docs/a.md": "# A\n"})
+        args = types.SimpleNamespace(
+            view_id="v", under=["docs", "apps"], tag=["doc"], exclude=["apps/ui"],
+            filter=None, doc="docs/a.md", line=None,
+        )
+        _cmd_view_add(tool, args)
+        self.assertEqual(tool.load()["views"]["v"]["filter"], {
+            "op": "and",
+            "children": [
+                {"op": "or", "children": [{"op": "under", "path": "apps"}, {"op": "under", "path": "docs"}]},
+                {"op": "tag", "tag": "doc"},
+                {"op": "not", "child": {"op": "under", "path": "apps/ui"}},
+            ],
+        })
+
+    def test_cmd_view_add_wires_filter_manifest(self):
+        import types
+
+        tool = self.make_filter_tool(docs={"docs/a.md": "# A\n"})
+        manifest = tool.repo_root / "filter.json"
+        manifest.write_text(
+            json.dumps({"filter": {"op": "tag", "tag": "core"}}, ensure_ascii=False),
+            encoding="utf-8", newline="\n",
+        )
+        args = types.SimpleNamespace(
+            view_id="v", under=None, tag=None, exclude=None,
+            filter=str(manifest), doc="docs/a.md", line=None,
+        )
+        _cmd_view_add(tool, args)
+        self.assertEqual(tool.load()["views"]["v"]["filter"], {"op": "tag", "tag": "core"})
+        self.assertIn("main.tsx", self.doc_text(tool, "docs/a.md"))  # 清单表达式已渲染生效
+
+    def test_cmd_view_add_rejects_bad_manifest(self):
+        import types
+
+        tool = self.make_filter_tool(docs={"docs/a.md": "# A\n"})
+        cases = {
+            "no-filter-key.json": '{"entries": 1}',
+            "not-object.json": '["filter"]',
+            "broken.json": '{"filter": ',
+        }
+        for name, content in cases.items():
+            with self.subTest(manifest=name):
+                manifest = tool.repo_root / name
+                manifest.write_text(content, encoding="utf-8", newline="\n")
+                args = types.SimpleNamespace(
+                    view_id="v", under=None, tag=None, exclude=None,
+                    filter=str(manifest), doc="docs/a.md", line=None,
+                )
+                with self.assertRaises(ToolError):
+                    _cmd_view_add(tool, args)
+        missing = types.SimpleNamespace(
+            view_id="v", under=None, tag=None, exclude=None,
+            filter=str(tool.repo_root / "ghost.json"), doc="docs/a.md", line=None,
+        )
+        with self.assertRaises(ToolError):
+            _cmd_view_add(tool, missing)
+        self.assertNotIn("views", tool.load())
 
     def test_cmd_view_add_passes_line(self):
         import types
 
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n\nL1\nL2\nL3\n"})
-        args = types.SimpleNamespace(view_id="v", under="apps", doc="docs/a.md", line=2)
+        args = types.SimpleNamespace(
+            view_id="v", under=["apps"], tag=None, exclude=None, filter=None, doc="docs/a.md", line=2,
+        )
         _cmd_view_add(tool, args)
         self.assertEqual(self.doc_text(tool, "docs/a.md").split("\n")[1], "```")
 
@@ -3562,8 +4071,8 @@ class CmdViewTest(ViewSandboxTest):
         from contextlib import redirect_stdout
 
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
-        tool.view_add("w", under="apps/ui", doc="docs/b.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
+        tool.view_add("w", unders=["apps/ui"], doc="docs/b.md")
         self.write_doc(tool, "docs/b.md", "# B\n")  # w 的块缺失
         args = types.SimpleNamespace()
         buf = io.StringIO()
@@ -3599,7 +4108,7 @@ class CmdViewDocTest(ViewSandboxTest):
         from contextlib import redirect_stdout
 
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         args = types.SimpleNamespace(view_id="v", add="docs/b.md", rm=None, line=None)
         buf = io.StringIO()
         with redirect_stdout(buf):
@@ -3613,7 +4122,7 @@ class CmdViewDocTest(ViewSandboxTest):
         import types
 
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n\nL1\nL2\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         args = types.SimpleNamespace(view_id="v", add="docs/b.md", rm=None, line=2)
         _cmd_view_doc(tool, args)
         self.assertEqual(self.doc_text(tool, "docs/b.md").split("\n")[1], "```")
@@ -3624,7 +4133,7 @@ class CmdViewDocTest(ViewSandboxTest):
         from contextlib import redirect_stdout
 
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
-        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
         tool.view_doc("v", add="docs/b.md")
         args = types.SimpleNamespace(view_id="v", add=None, rm="docs/b.md", line=None)
         buf = io.StringIO()
