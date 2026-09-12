@@ -27,8 +27,10 @@ from tree_tool import (  # noqa: E402
     _cmd_rm_batch,
     _cmd_root,
     _cmd_view_add,
+    _cmd_view_doc,
     _cmd_view_list,
     append_view_block,
+    block_content,
     canonical_form,
     default_history_path,
     dumps_canonical,
@@ -3066,6 +3068,349 @@ class ViewUpsertTest(ViewSandboxTest):
         self.assertIn(begin, self.doc_text(tool, "docs/b.md"))  # 新文档已有块
 
 
+class ViewDocMirrorTest(ViewSandboxTest):
+    """一 id 多文档镜像：view-doc --add 扩充绑定清单，全部文档块内容一致且联动刷新。"""
+
+    def block(self, tool: TreeTool, rel: str, view_id: str = "v") -> str:
+        begin, end = view_tree_markers(view_id)
+        return block_content(self.doc_text(tool, rel), begin, end)
+
+    def bind_two(self, tool: TreeTool) -> None:
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_doc("v", add="docs/b.md")
+
+    def test_view_doc_add_mirrors_same_block_content(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        self.bind_two(tool)
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md", "docs/b.md"])  # 清单扩充且排序
+        self.assertEqual(self.block(tool, "docs/a.md"), self.block(tool, "docs/b.md"))   # 镜像内容一致
+        self.assertEqual(self.doc_text(tool, "docs/a.md").count(view_tree_markers("v")[0]), 1)
+        self.assertEqual(self.doc_text(tool, "docs/b.md").count(view_tree_markers("v")[0]), 1)
+
+    def test_data_change_refreshes_all_mirrors(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        self.bind_two(tool)
+        import types
+
+        args = types.SimpleNamespace(
+            path="apps/new.tsx", desc="新增", detail=None, rel=None, tags=None,
+            dir=False, collapsed=None, hidden=None, git_ignore=None,
+        )
+        _cmd_add(tool, args)  # CLI 层：写后自动渲染全部视图 × 全部绑定文档
+        self.assertIn("new.tsx", self.block(tool, "docs/a.md"))
+        self.assertIn("new.tsx", self.block(tool, "docs/b.md"))
+
+    def test_view_doc_add_line_semantics_same_as_view_add(self):
+        # --line 语义与 view-add 完全一致：围栏首行承诺落点、上下空行保证
+        doc = "# 标题\n\n" + "\n".join(f"L{i}" for i in range(1, 16)) + "\n"
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": doc})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_doc("v", add="docs/b.md", line=4)
+        lines = self.doc_text(tool, "docs/b.md").split("\n")
+        self.assertEqual(lines[3], "```")  # 围栏首行落第 4 行（承诺落点）
+        self.assertEqual(lines[2], "")     # 补的前导空行
+        begin, end = view_tree_markers("v")
+        e = lines.index(end)
+        self.assertEqual(lines[e + 1], "```")
+        self.assertEqual(lines[e + 2], "")  # 块下方空行
+        self.assertEqual(lines[e + 3], "L1")  # 原第 3 行内容（L1）完整后移
+        # 既有绑定文档的块不受 --line 影响：原地刷新、不重定位
+        a_lines = self.doc_text(tool, "docs/a.md").split("\n")
+        self.assertEqual(a_lines[0], "# A")
+        self.assertEqual(a_lines[1], "")   # view-add 追加尾部形态保持
+        self.assertEqual(a_lines[2], "```")
+
+    def test_view_doc_add_line_out_of_range_rejected(self):
+        doc = "# B\n\nL1\nL2\nL3\n"
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": doc})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        with self.assertRaises(ToolError):
+            tool.view_doc("v", add="docs/b.md", line=99)
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md"])  # 拒绝保持原子
+        self.assertNotIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/b.md"))
+
+    def test_view_doc_add_reactivates_orphan_block_in_place(self):
+        # 解绑后再重新绑定：孤儿块原地激活（内容刷新为当前渲染产物，位置保留）
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_doc("v", add="docs/b.md")
+        tool.view_doc("v", rm="docs/a.md")  # a 解绑，块保留为孤儿
+        begin, _end = view_tree_markers("v")
+        fence_idx_before = self.doc_text(tool, "docs/a.md").split("\n").index("```")
+        tool.add("apps/late.tsx", desc="后到的")  # 方法层写入，不触发渲染（孤儿块不刷新）
+        self.assertNotIn("late.tsx", self.doc_text(tool, "docs/a.md"))
+        tool.view_doc("v", add="docs/a.md")  # 重新绑定：孤儿块原地激活
+        text = self.doc_text(tool, "docs/a.md")
+        self.assertEqual(text.count(begin), 1)
+        self.assertIn("late.tsx", self.block(tool, "docs/a.md"))  # 内容已刷新
+        self.assertEqual(text.split("\n").index("```"), fence_idx_before)  # 位置保留
+        self.assertEqual(self.block(tool, "docs/a.md"), self.block(tool, "docs/b.md"))  # 重新入镜像
+
+
+class ViewDocAddTest(ViewSandboxTest):
+    """view-doc --add 校验契约：视图须存在、文档须存在、重复绑定拒绝、配置先行视图可后补。"""
+
+    def make_bound(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        return tool
+
+    def test_rejects_duplicate_binding(self):
+        # 重复绑定报错拒绝（裁定）：--add 语义保持单一"绑定新文档"，重定位走 view-add 同 id upsert
+        tool = self.make_bound()
+        with self.assertRaises(ToolError) as ctx:
+            tool.view_doc("v", add="docs/a.md")
+        self.assertIn("已绑定", str(ctx.exception))
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md"])  # 配置不动
+        undo_ops, _ = tool.history_summary()
+        self.assertEqual(len(undo_ops), 1)  # 无半截历史（仅 view-add 那步）
+
+    def test_rejects_missing_doc(self):
+        tool = self.make_bound()
+        with self.assertRaises(ToolError) as ctx:
+            tool.view_doc("v", add="docs/missing.md")
+        self.assertIn("docs/missing.md", str(ctx.exception))
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md"])  # 不落盘
+        self.assertFalse((tool.repo_root / "docs" / "missing.md").exists())  # 不凭空创建
+
+    def test_rejects_unknown_view(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        with self.assertRaises(ToolError) as ctx:
+            tool.view_doc("ghost", add="docs/a.md")
+        self.assertIn("ghost", str(ctx.exception))
+        self.assertNotIn("views", tool.load())
+        undo_ops, _ = tool.history_summary()
+        self.assertEqual(undo_ops, [])
+
+    def test_add_to_config_only_view(self):
+        # 配置先行的视图（view-add 未给 --doc）可后补绑定文档
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", under="apps")
+        self.assertNotIn("docs", tool.load()["views"]["v"])
+        tool.view_doc("v", add="docs/a.md")
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md"])
+        self.assertIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/a.md"))
+
+    def test_param_validation(self):
+        tool = self.make_bound()
+        with self.assertRaises(ToolError):
+            tool.view_doc("v")  # --add/--rm 都不给
+        with self.assertRaises(ToolError):
+            tool.view_doc("v", add="docs/b.md", rm="docs/a.md")  # 同时给
+        with self.assertRaises(ToolError):
+            tool.view_doc("v", rm="docs/a.md", line=2)  # --line 依附 --add
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md"])
+
+
+class ViewDocRmTest(ViewSandboxTest):
+    """view-doc --rm：解绑保留块（孤儿不再刷新），剩余镜像照常刷新。"""
+
+    def block(self, tool: TreeTool, rel: str, view_id: str = "v") -> str:
+        begin, end = view_tree_markers(view_id)
+        return block_content(self.doc_text(tool, rel), begin, end)
+
+    def bind_two(self, tool: TreeTool) -> None:
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_doc("v", add="docs/b.md")
+
+    def test_rm_unbinds_and_keeps_block(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        self.bind_two(tool)
+        tool.view_doc("v", rm="docs/b.md")
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md"])  # 清单移除
+        self.assertIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/b.md"))  # 块保留
+
+    def test_rm_block_stale_after_data_change(self):
+        # 解绑后数据变更：孤儿块不再刷新，其余镜像照常刷新
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        self.bind_two(tool)
+        tool.view_doc("v", rm="docs/b.md")
+        import types
+
+        args = types.SimpleNamespace(
+            path="apps/new.tsx", desc="新增", detail=None, rel=None, tags=None,
+            dir=False, collapsed=None, hidden=None, git_ignore=None,
+        )
+        _cmd_add(tool, args)
+        self.assertNotIn("new.tsx", self.block(tool, "docs/b.md"))  # 孤儿块不刷新
+        self.assertIn("new.tsx", self.block(tool, "docs/a.md"))     # 绑定中的镜像刷新
+
+    def test_rm_refreshes_remaining_mirrors(self):
+        # --rm 本身是数据变更：剩余绑定文档的镜像随之刷新（块内容漂移被纠正）
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        self.bind_two(tool)
+        begin, end = view_tree_markers("v")
+        lines = self.doc_text(tool, "docs/a.md").split("\n")
+        lines.insert(lines.index(end), "手改漂移行")  # 模拟 a 块内容被手改
+        self.write_doc(tool, "docs/a.md", "\n".join(lines))
+        tool.view_doc("v", rm="docs/b.md")
+        self.assertNotIn("手改漂移行", self.doc_text(tool, "docs/a.md"))  # 漂移被刷新纠正
+        self.assertIn("main.tsx", self.block(tool, "docs/a.md"))
+
+    def test_rejects_unbound_doc(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n", "docs/c.md": "# C\n"})
+        self.bind_two(tool)
+        with self.assertRaises(ToolError) as ctx:
+            tool.view_doc("v", rm="docs/c.md")
+        self.assertIn("未绑定", str(ctx.exception))
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md", "docs/b.md"])
+
+    def test_rejects_missing_doc_on_rm(self):
+        # 清单在、文档已被删：给出可理解错误（不落盘）
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        self.bind_two(tool)
+        (tool.repo_root / "docs" / "b.md").unlink()
+        with self.assertRaises(ToolError) as ctx:
+            tool.view_doc("v", rm="docs/b.md")
+        self.assertIn("docs/b.md", str(ctx.exception))
+        self.assertIn("不存在", str(ctx.exception))
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md", "docs/b.md"])  # 不落盘
+
+    def test_rm_last_doc_yields_config_only(self):
+        # 解绑最后一个文档：视图退化为配置先行（空 docs 省略键），块保留
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_doc("v", rm="docs/a.md")
+        self.assertEqual(tool.load()["views"]["v"], {"filter": {"op": "under", "path": "apps"}})
+        self.assertIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/a.md"))
+
+
+class ViewDocPathologyTest(ViewSandboxTest):
+    """病态拦截：同一文档内同 id 出现多于一个块时，相关命令报错并指明文档与块数，不做猜测性修复。"""
+
+    def duplicate_block(self, tool: TreeTool, rel: str, view_id: str) -> None:
+        """把文档中视图块的整段（含围栏）复制一份拼到尾部，构造同 id 双块病态。"""
+        text = self.doc_text(tool, rel)
+        begin, end = view_tree_markers(view_id)
+        lines = text.split("\n")
+        b, e = lines.index(begin), lines.index(end)
+        block = lines[b - 1 : e + 2]  # 含上下围栏
+        self.write_doc(tool, rel, text.rstrip("\n") + "\n\n" + "\n".join(block) + "\n")
+
+    def test_multi_block_rejects_view_doc_add_atomically(self):
+        # 病态文档已在绑定清单中：--add 新文档的 dry-run 覆盖全清单，落盘前拦截
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        self.duplicate_block(tool, "docs/a.md", "v")
+        with self.assertRaises(ToolError) as ctx:
+            tool.view_doc("v", add="docs/b.md")
+        msg = str(ctx.exception)
+        self.assertIn("docs/a.md", msg)  # 指明文档路径
+        self.assertIn("2", msg)          # 指明块数
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md"])  # 拒绝保持原子
+        self.assertNotIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/b.md"))
+        undo_ops, _ = tool.history_summary()
+        self.assertEqual(len(undo_ops), 1)  # 无半截历史
+
+    def test_multi_block_rejects_view_add_upsert(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        self.duplicate_block(tool, "docs/a.md", "v")
+        with self.assertRaises(ToolError) as ctx:
+            tool.view_add("v", under="apps/ui", doc="docs/a.md")  # upsert 重定位/改锚点
+        msg = str(ctx.exception)
+        self.assertIn("docs/a.md", msg)
+        self.assertIn("2", msg)
+        self.assertEqual(tool.load()["views"]["v"]["filter"], {"op": "under", "path": "apps"})  # 配置不动
+
+    def test_multi_block_rejects_data_command_render(self):
+        # 数据命令：写入成功在前、渲染在后——病态阻断渲染报错，数据已落盘；
+        # 手改修复病态后重跑 render 即恢复（不做猜测性修复）
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        self.duplicate_block(tool, "docs/a.md", "v")
+        import types
+
+        args = types.SimpleNamespace(
+            path="apps/new.tsx", desc="新增", detail=None, rel=None, tags=None,
+            dir=False, collapsed=None, hidden=None, git_ignore=None,
+        )
+        with self.assertRaises(ToolError) as ctx:
+            _cmd_add(tool, args)
+        msg = str(ctx.exception)
+        self.assertIn("docs/a.md", msg)
+        self.assertIn("2", msg)
+        self.assertIn("new.tsx", tool.load()["tree"]["apps"]["children"])  # 数据已写入
+        # 修复病态（手改删除多余块）后 render 恢复正常
+        begin, end = view_tree_markers("v")
+        lines = self.doc_text(tool, "docs/a.md").split("\n")
+        first_end = lines.index(end)
+        second_begin = lines.index(begin, first_end)
+        second_fence_end = lines.index(end, first_end + 1) + 1  # 第二份块的结尾围栏
+        repaired = lines[: second_begin - 1] + lines[second_fence_end + 1 :]  # 连同上方空行删掉第二份块
+        self.write_doc(tool, "docs/a.md", "\n".join(repaired))
+        tool.render()  # 不再抛错
+        self.assertEqual(self.doc_text(tool, "docs/a.md").count(begin), 1)
+        self.assertIn("new.tsx", self.doc_text(tool, "docs/a.md"))  # 镜像补齐刷新
+
+    def test_multi_block_rejects_render_command(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        self.duplicate_block(tool, "docs/a.md", "v")
+        with self.assertRaises(ToolError) as ctx:
+            tool.render()
+        msg = str(ctx.exception)
+        self.assertIn("docs/a.md", msg)
+        self.assertIn("2", msg)
+
+
+class ViewDocUndoTest(ViewSandboxTest):
+    """view-doc 撤销：单步历史，undo/redo 连同配置与渲染产物一并回放。"""
+
+    def test_view_doc_add_single_history_step_and_undo(self):
+        original_b = "# B\n\n正文段落。\n"
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": original_b})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_doc("v", add="docs/b.md", line=2)
+        undo_ops, _ = tool.history_summary()
+        self.assertEqual(len(undo_ops), 2)
+        self.assertIn("view-doc", undo_ops[-1])
+        tool.undo()
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md"])   # 清单恢复
+        self.assertEqual(self.doc_text(tool, "docs/b.md"), original_b)       # 渲染产物恢复
+
+    def test_view_doc_add_redo_roundtrip(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_doc("v", add="docs/b.md", line=2)
+        after = self.doc_text(tool, "docs/b.md")
+        tool.undo()
+        tool.redo()
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md", "docs/b.md"])
+        self.assertEqual(self.doc_text(tool, "docs/b.md"), after)  # 块内容与位置回放
+
+    def test_undo_view_doc_rm_rebinds_and_refreshes(self):
+        # 撤销 --rm：清单恢复，解绑时保留的孤儿块重新入镜像刷新（漂移被纠正）
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_doc("v", add="docs/b.md")
+        tool.view_doc("v", rm="docs/b.md")
+        begin, end = view_tree_markers("v")
+        lines = self.doc_text(tool, "docs/b.md").split("\n")
+        lines.insert(lines.index(end), "孤儿期间手改漂移")  # 孤儿期间块内容被手改
+        self.write_doc(tool, "docs/b.md", "\n".join(lines))
+        tool.undo()  # 撤销 --rm
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md", "docs/b.md"])
+        text = self.doc_text(tool, "docs/b.md")
+        self.assertEqual(text.count(begin), 1)
+        self.assertNotIn("孤儿期间手改漂移", text)  # 块重新激活并刷新到当前数据
+        self.assertEqual(
+            block_content(text, begin, end),
+            block_content(self.doc_text(tool, "docs/a.md"), begin, end),  # 重新入镜像
+        )
+
+    def test_redo_view_doc_rm_keeps_orphan_block(self):
+        # 重做 --rm：清单再次移除，文档中的块保留为孤儿
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_doc("v", add="docs/b.md")
+        tool.view_doc("v", rm="docs/b.md")
+        tool.undo()
+        tool.redo()
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md"])
+        self.assertIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/b.md"))  # 块保留
+
+
 class ViewListTest(ViewSandboxTest):
     """view-list：id / 过滤器摘要 / 绑定文档数 / 块存在情况。"""
 
@@ -3243,6 +3588,53 @@ class CmdViewTest(ViewSandboxTest):
         with redirect_stdout(buf):
             _cmd_view_list(tool, types.SimpleNamespace())
         self.assertIn("无视图", buf.getvalue())
+
+
+class CmdViewDocTest(ViewSandboxTest):
+    """CLI 层 view-doc：参数接线与输出。"""
+
+    def test_cmd_view_doc_add_wires_args(self):
+        import io
+        import types
+        from contextlib import redirect_stdout
+
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        args = types.SimpleNamespace(view_id="v", add="docs/b.md", rm=None, line=None)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _cmd_view_doc(tool, args)
+        self.assertEqual(tool.load()["views"]["v"]["docs"], ["docs/a.md", "docs/b.md"])
+        self.assertIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/b.md"))
+        self.assertIn("docs/b.md", buf.getvalue())
+        self.assertIn("单步历史", buf.getvalue())
+
+    def test_cmd_view_doc_add_passes_line(self):
+        import types
+
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n\nL1\nL2\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        args = types.SimpleNamespace(view_id="v", add="docs/b.md", rm=None, line=2)
+        _cmd_view_doc(tool, args)
+        self.assertEqual(self.doc_text(tool, "docs/b.md").split("\n")[1], "```")
+
+    def test_cmd_view_doc_rm_output(self):
+        import io
+        import types
+        from contextlib import redirect_stdout
+
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        tool.view_add("v", under="apps", doc="docs/a.md")
+        tool.view_doc("v", add="docs/b.md")
+        args = types.SimpleNamespace(view_id="v", add=None, rm="docs/b.md", line=None)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _cmd_view_doc(tool, args)
+        out = buf.getvalue()
+        self.assertIn("已解绑", out)
+        self.assertIn("docs/b.md", out)
+        self.assertIn("保留", out)  # 提示块保留为孤儿
+        self.assertIn(view_tree_markers("v")[0], self.doc_text(tool, "docs/b.md"))
 
 
 class SelfHostTest(unittest.TestCase):

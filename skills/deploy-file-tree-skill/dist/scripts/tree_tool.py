@@ -15,6 +15,11 @@ AGENTS.md 不存在则生成最小骨架。子树视图 = tree.json 顶层 views
 渲染配置（id + 过滤器 + 绑定文档清单），把数据的切片投影（剪影）渲染到各
 绑定文档的带 id 标记块（代码围栏包裹，仅树块无 tags 块）；骨架目录只作
 容器不显示简介，首行为全局 root 名，hidden 条目在任何视图不出现。
+一个视图 id 可绑定一个或多个文档：全部绑定文档中的块内容完全相同（同一
+渲染产物镜像），任何数据变更后全部镜像同步刷新；绑定清单的增量增删走
+view-doc（--rm 解绑默认保留块为孤儿，不再刷新）。同一文档内同 id 出现多
+于一个块属病态：相关命令（view-doc、view-add、触发渲染的数据命令）报错
+并指明文档路径与块数，不做猜测性修复。
 detail 完整描述只存于 tree.json 供查询，不渲染。渲染控制字段只影响树渲染：
 目录 collapsed=true 折叠（目录行带 … 不展开 children）；条目 hidden=true
 整体隐藏（含子树）；两者默认 false（不落盘），数据、查询与 check 校验始终
@@ -44,6 +49,7 @@ git 之外（未被跟踪且被 ignore 规则覆盖，二者违反其一均报�
   python tree_tool.py tag-add <名> -d 说明
   python tree_tool.py tag-rm <名>
   python tree_tool.py view-add <id> --under <目录> [--doc <路径> [--line N]]
+  python tree_tool.py view-doc <id> (--add <路径> [--line N] | --rm <路径>)
   python tree_tool.py view-list
   python tree_tool.py undo | redo | history
   python tree_tool.py check [--strict]
@@ -1211,12 +1217,20 @@ class TreeTool:
         return render_silhouette(name, data["tree"], parts), parts
 
     @staticmethod
-    def _plan_view_block(text: str, begin: str, end: str, content: str, target_line: int | None) -> str:
+    def _plan_view_block(text: str, begin: str, end: str, content: str, target_line: int | None, doc_rel: str) -> str:
         """单文档的块放置计划（纯函数）：已存在块原地替换或按行重定位，缺失则插入/追加。
 
         重定位（target_line 给定且块已存在）：先删除旧块（含围栏与紧邻空行），
         行号以删除后的文档为基准；dry-run 调用即校验（越界/孤立标记在此抛错）。
+        病态拦截：同一文档内同 id 多于一个块（>1 个 begin 标记行）报错并指明
+        文档路径与块数，不做猜测性修复；doc_rel 仅供错误信息定位。
         """
+        n_blocks = text.split("\n").count(begin)
+        if n_blocks > 1:
+            raise ToolError(
+                f"文档 {doc_rel} 存在 {n_blocks} 个同 id 标记块（恰好 1 个才可操作），"
+                f"不做猜测性修复，请手改删除多余块后重试: {begin}"
+            )
         if begin in text:
             if target_line is not None:
                 return insert_block_at_line(
@@ -1229,12 +1243,15 @@ class TreeTool:
             return insert_block_at_line(text, begin, end, content, target_line)
         return append_view_block(text, begin, end, content)
 
-    def _render_view(self, view_id: str, spec: dict, data: dict, target_line: int | None = None) -> list[Path]:
-        """把视图剪影渲染到全部绑定文档。
+    def _render_view(self, view_id: str, spec: dict, data: dict, target_line: int | None = None, target_doc: str | None = None) -> list[Path]:
+        """把视图剪影渲染到全部绑定文档（镜像：块内容完全相同）。
 
         块已存在且 target_line 给定 → 重定位（删除后按行插入；行号以删除旧块后
         的文档为基准）；块已存在无 target_line → 原地替换内容；块不存在 →
-        按 target_line 插入或追加尾部。绑定文档缺失时跳过（不凭空创建）。
+        按 target_line 插入或追加尾部。target_line 仅作用于 target_doc 指定的
+        文档（未指定时作用于全部绑定文档，兼容单文档清单的旧调用方）——
+        view-doc --add 借此只让新文档按行落位、既有镜像原地刷新不重定位。
+        绑定文档缺失时跳过（不凭空创建）。
         """
         made = self._view_renderable(view_id, spec, data)
         if made is None:
@@ -1249,7 +1266,8 @@ class TreeTool:
             except FileNotFoundError:
                 print(f"警告: 视图 {view_id} 绑定文档不存在，跳过: {doc_rel}", file=sys.stderr)
                 continue
-            new_text = self._plan_view_block(text, begin, end, content, target_line)
+            line_for_doc = target_line if (target_doc is None or doc_rel == target_doc) else None
+            new_text = self._plan_view_block(text, begin, end, content, line_for_doc, doc_rel)
             if new_text != text:
                 with path.open("w", encoding="utf-8", newline="\n") as f:
                     f.write(new_text)
@@ -1294,7 +1312,7 @@ class TreeTool:
             views[view_id]["docs"] = docs_list
         candidate["views"] = views
         normalize_data(candidate)  # 写前预检（render_overrides 等手改在此拦截，拒绝不留半截历史）
-        if docs_list:  # 渲染计划 dry-run：行号越界/孤立标记等在落盘前暴露，拒绝保持原子
+        if docs_list:  # 渲染计划 dry-run：行号越界/孤立标记/同 id 多块等在落盘前暴露，拒绝保持原子
             made = self._view_renderable(view_id, views[view_id], data)
             if made is not None:
                 content, _parts = made
@@ -1302,13 +1320,89 @@ class TreeTool:
                 for doc_rel in docs_list:
                     text = self._read_doc(doc_rel)
                     if text is not None:
-                        self._plan_view_block(text, begin, end, content, line)
+                        self._plan_view_block(text, begin, end, content, line, doc_rel)
         self._record_undo(
             f"view-add {view_id}",
             docs={doc_rel: self._read_doc(doc_rel)} if docs_list else None,
         )
         self.write_data(candidate)
-        self._render_view(view_id, self.load()["views"][view_id], self.load(), target_line=line)
+        self._render_view(
+            view_id, self.load()["views"][view_id], self.load(),
+            target_line=line, target_doc=docs_list[0] if docs_list else None,
+        )
+
+    def view_doc(self, view_id: str, add: str | None = None, rm: str | None = None, line: int | None = None) -> None:
+        """视图绑定文档的增量管理（视图须已由 view-add 登记）。
+
+        --add：把新文档加入绑定清单并渲染（镜像语义：全清单块内容相同），
+        --line 放置语义与 view-add 完全一致且仅作用于新文档（既有镜像原地
+        刷新不重定位）；文档中有该 id 的孤儿块时原地激活刷新；重复绑定同一
+        文档报错拒绝（重定位块请用 view-add 同 id upsert --line）。
+        --rm：从清单解绑某文档并保留其中的块（孤儿状态，不再刷新），剩余
+        绑定文档照常刷新保持镜像一致；一次操作只动一个文档。
+        单步撤销历史：--add 快照目标文档全文（块位置不可重推导），--rm 不动
+        文档无需快照。
+        """
+        if (add is None) == (rm is None):
+            raise ToolError("--add 与 --rm 必须恰给其一")
+        if line is not None and add is None:
+            raise ToolError("--line 须与 --add 同用（行号是绑定文档内的落位参数）")
+        data = self.load()
+        views = data.get("views", {})
+        if view_id not in views:
+            raise ToolError(f"视图不存在: {view_id}（view-doc 只调整既有视图的绑定清单，创建用 view-add）")
+        spec = views[view_id]
+        if add is not None:
+            doc_rel = "/".join(split_rel_path(add))
+            if doc_rel in spec.get("docs", []):
+                raise ToolError(f"视图 {view_id} 已绑定文档 {doc_rel}（重复绑定；调整块位置用 view-add 同 id --line）")
+            if not self._doc_path(doc_rel).is_file():
+                raise ToolError(f"绑定文档不存在（先创建文档再绑定视图）: {doc_rel}")
+            new_spec = dict(spec)
+            new_spec["docs"] = sorted(spec.get("docs", []) + [doc_rel], key=sort_key)
+            candidate = {**data, "views": {k: dict(v) for k, v in views.items()} | {view_id: new_spec}}
+            normalize_data(candidate)  # 写前预检（保持原子）
+            # 渲染计划 dry-run 覆盖扩充后的全清单（不止新文档）：既有文档的
+            # 病态多块/孤立标记同样在落盘前暴露；--line 仅校验新文档
+            made = self._view_renderable(view_id, new_spec, data)
+            if made is not None:
+                content, _parts = made
+                begin, end = view_tree_markers(view_id)
+                for other_rel in new_spec["docs"]:
+                    text = self._read_doc(other_rel)
+                    if text is not None:
+                        self._plan_view_block(text, begin, end, content, line if other_rel == doc_rel else None, other_rel)
+            self._record_undo(
+                f"view-doc --add {view_id} {doc_rel}",
+                docs={doc_rel: self._read_doc(doc_rel)},
+            )
+            self.write_data(candidate)
+            self._render_view(
+                view_id, self.load()["views"][view_id], self.load(),
+                target_line=line, target_doc=doc_rel,
+            )
+        else:
+            doc_rel = "/".join(split_rel_path(rm))
+            docs = spec.get("docs", [])
+            if doc_rel not in docs:
+                bound = ", ".join(docs) if docs else "无"
+                raise ToolError(f"视图 {view_id} 未绑定文档 {doc_rel}（当前绑定: {bound}）")
+            if not self._doc_path(doc_rel).is_file():
+                raise ToolError(
+                    f"文档不存在: {doc_rel}（解绑保留块需要文档在磁盘上存在；"
+                    f"文档已被删除时用 view-add 重建绑定清单移除悬空绑定）"
+                )
+            remaining = [d for d in docs if d != doc_rel]
+            new_spec = {k: v for k, v in spec.items() if k != "docs"}
+            if remaining:
+                new_spec["docs"] = remaining  # 空 docs 省略键：视图退化为配置先行
+            candidate = {**data, "views": {k: dict(v) for k, v in views.items()} | {view_id: new_spec}}
+            normalize_data(candidate)
+            self._record_undo(f"view-doc --rm {view_id} {doc_rel}")  # 不动任何文档，无需 docs 快照
+            self.write_data(candidate)
+            # --rm 也是数据变更：剩余绑定文档照常刷新保持镜像一致
+            # （解绑文档不在清单中，其保留的块不再被触碰）
+            self._render_view(view_id, self.load()["views"][view_id], self.load())
 
     def view_list(self) -> list[dict]:
         """全部视图概要：id / 过滤器摘要 / 绑定文档清单与块存在情况（按 id 排序）。"""
@@ -1694,6 +1788,15 @@ def _cmd_view_add(tool: TreeTool, args) -> None:
     print(f"已登记视图并渲染: {args.view_id}{target}（一次变更，单步历史）")
 
 
+def _cmd_view_doc(tool: TreeTool, args) -> None:
+    tool.view_doc(args.view_id, add=args.add, rm=args.rm, line=args.line)
+    if args.add:
+        suffix = f"（围栏首行第 {args.line} 行）" if args.line else ""
+        print(f"已绑定并渲染镜像块: {args.view_id} -> {args.add}{suffix}（一次变更，单步历史）")
+    else:
+        print(f"已解绑（文档中的块保留为孤儿，不再刷新）: {args.view_id} -x- {args.rm}（一次变更，单步历史）")
+
+
 def _cmd_view_list(tool: TreeTool, args) -> None:
     views = tool.view_list()
     if not views:
@@ -1836,6 +1939,19 @@ def main(argv=None) -> int:
 
     sub.add_parser("view-list", help="列出全部视图概要（id / 过滤器摘要 / 绑定文档数 / 块存在情况）")
 
+    p = sub.add_parser(
+        "view-doc",
+        help="调整既有视图的绑定文档清单（增量）：--add 绑定新文档并渲染镜像块，--rm 解绑但保留文档中的块",
+    )
+    p.add_argument("view_id", help="既有视图 id（创建视图用 view-add）")
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument("--add", metavar="DOC", help="绑定文档（仓库相对路径，需已存在且未绑定；有孤儿块时原地激活刷新）")
+    group.add_argument("--rm", metavar="DOC", help="解绑文档（从清单移除，默认保留文档中的块为孤儿）")
+    p.add_argument(
+        "--line", type=int,
+        help="围栏首行落点（仅与 --add 同用）：插在当前第 N 行内容之前（1-based，越界报错）；省略则块存在原地更新、缺失追加文档尾部；仅作用于本次绑定的文档",
+    )
+
     p = sub.add_parser("check", help="校验全部不变量")
     p.add_argument("--strict", action="store_true", help="告警也视为失败")
 
@@ -1871,6 +1987,7 @@ def main(argv=None) -> int:
         "tag-add": _cmd_tag_add,
         "tag-rm": _cmd_tag_rm,
         "view-add": _cmd_view_add,
+        "view-doc": _cmd_view_doc,
         "view-list": _cmd_view_list,
         "undo": _cmd_undo,
         "redo": _cmd_redo,
