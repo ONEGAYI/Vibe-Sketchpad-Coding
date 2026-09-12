@@ -13,8 +13,14 @@ tree.json 持久化为紧凑 JSON（UTF-8 无 BOM、中文直存、无缩进、�
 块内有标记则替换标记间内容；无标记则附加到文件尾部（带小节标题）；
 AGENTS.md 不存在则生成最小骨架。子树视图 = tree.json 顶层 views 键登记的
 渲染配置（id + 过滤器 + 绑定文档清单），把数据的切片投影（剪影）渲染到各
-绑定文档的带 id 标记块（代码围栏包裹，仅树块无 tags 块）；骨架目录只作
-容器不显示简介，首行为全局 root 名，hidden 条目在任何视图不出现。
+绑定文档的带 id 标记块（代码围栏包裹，仅树块无 tags 块）。过滤器为五种
+节点（and/or/not/under/tag）的表达式树，在 tree.json 全量条目上求值（not
+为补集语义）；CLI 快捷参数编译为规范表达式树落盘（多锚点并集、锚点×标签
+交集、排除差集），完整布尔组合走 --filter 清单文件；引用（under 树中目录、
+tag 已登记标签）在 view-add 写盘前预检拒绝。剪影把选中集投回全树结构：选中
+条目正常渲染（简介照常、collapsed 生效），仅含选中后代的未选中祖先目录作
+路径骨架（只作容器不显示简介、不折叠），首行为全局 root 名，hidden 条目在
+任何视图不出现，空选中集渲染仅剩根名行。
 detail 完整描述只存于 tree.json 供查询，不渲染。渲染控制字段只影响树渲染：
 目录 collapsed=true 折叠（目录行带 … 不展开 children）；条目 hidden=true
 整体隐藏（含子树）；两者默认 false（不落盘），数据、查询与 check 校验始终
@@ -43,7 +49,8 @@ git 之外（未被跟踪且被 ignore 规则覆盖，二者违反其一均报�
                          [--git-ignore|--no-git-ignore] [--depth N]
   python tree_tool.py tag-add <名> -d 说明
   python tree_tool.py tag-rm <名>
-  python tree_tool.py view-add <id> --under <目录> [--doc <路径> [--line N]]
+  python tree_tool.py view-add <id> (--under <目录>)... [--tag <标签>]... [--exclude <目录>]...
+                         [--filter <清单.json>] [--doc <路径> [--line N]]
   python tree_tool.py view-list
   python tree_tool.py undo | redo | history
   python tree_tool.py check [--strict]
@@ -78,7 +85,7 @@ FENCE = "```"
 # 视图 id：小写字母/数字开头，允许连字符与下划线，总长 1-64；default 为默认视图保留字
 VIEW_ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 VIEW_ID_RESERVED = "default"
-# 过滤器表达式树的节点算子（spec 一期 schema 定稿；渲染消费当前仅实现单 under 锚点）
+# 过滤器表达式树的节点算子（spec 一期 schema 定稿；求值与渲染消费已全量支持五种节点）
 FILTER_OPS = frozenset({"and", "or", "not", "under", "tag"})
 
 
@@ -458,27 +465,117 @@ def render_tree(root_name: str, tree: dict) -> str:
     return "\n".join(lines)
 
 
-def render_silhouette(root_name: str, tree: dict, under_parts: list[str]) -> str:
-    """渲染单锚点剪影：根到锚点的目录链只作容器（不显示简介），锚点子树正常渲染。
+def render_silhouette(root_name: str, tree: dict, selected: set[str]) -> str:
+    """选中集投回全树结构的剪影渲染。
 
-    首行为全局 root 名；hidden 条目在任何视图不出现——锚点链上任一节点
-    hidden 时整个视图只剩 root 行（隐藏语义覆盖子树）。
+    选中条目正常渲染（简介照常、选中目录 collapsed 折叠生效）；仅含选中后代
+    的未选中祖先目录作路径骨架——只作容器：无简介、忽略 collapsed 强制展开
+    （折叠会让剪影丢内容）。hidden 条目在任何视图不出现（hidden 目录连同
+    子树整体跳过，与简版树同语义）；空选中集仅剩首行全局 root 名。
     """
+    skeleton: set[str] = set()
+    for path in selected:
+        parts = path.split("/")
+        for i in range(1, len(parts)):
+            ancestor = "/".join(parts[:i])
+            if ancestor not in selected:
+                skeleton.add(ancestor)
     lines = [root_name + "/"]
-    prefix = ""
-    cursor: dict = {"children": tree}
-    for part in under_parts:
-        child = cursor["children"].get(part)
-        if child is None:  # 调用方已校验锚点存在；防御数据竞态
-            break
-        if child.get("hidden"):
-            return root_name + "/"
-        lines.append(prefix + "└── " + part + "/")
-        prefix += "    "
-        cursor = child
-    if is_dir(cursor):
-        lines.extend(render_children_lines(cursor["children"], prefix))
+    lines.extend(_silhouette_lines(tree, "", [], selected, skeleton))
     return "\n".join(lines)
+
+
+def _silhouette_lines(children: dict, prefix: str, parts: list[str], selected: set[str], skeleton: set[str]) -> list[str]:
+    """剪影的单层子级渲染（与 render_children_lines 同款对齐）：仅渲染选中条目与骨架祖先。
+
+    hidden 节点连同子树跳过；骨架目录不显示简介且不折叠；选中条目简介照常、
+    目录 collapsed 生效（折叠即不再下钻，与简版树一致）。
+    """
+    items = []
+    for name, node in sorted(children.items(), key=lambda kv: sort_key(kv[0])):
+        if node.get("hidden"):
+            continue
+        path = "/".join(parts + [name])
+        if path in selected:
+            items.append((name, node, True))
+        elif path in skeleton:
+            items.append((name, node, False))
+    if not items:
+        return []
+    stems = []
+    for i, (name, node, is_sel) in enumerate(items):
+        connector = "└── " if i == len(items) - 1 else "├── "
+        suffix = "/" if is_dir(node) else ""
+        if suffix and is_sel and node.get("collapsed") and node["children"]:
+            suffix = "/…"  # 仅选中目录可折叠；骨架目录必须展开到选中后代
+        stems.append(prefix + connector + name + suffix)
+    column = max(len(s) for s in stems) + 1
+    lines = []
+    for i, ((name, node, is_sel), stem) in enumerate(zip(items, stems)):
+        cont_prefix = prefix + ("    " if i == len(items) - 1 else "│   ")
+        if is_sel and node.get("desc"):
+            lines.append(stem + " " * (column - len(stem)) + "# " + node["desc"])
+        else:
+            lines.append(stem)
+        if is_dir(node) and node["children"] and not (is_sel and node.get("collapsed")):
+            lines.extend(_silhouette_lines(node["children"], cont_prefix, parts + [name], selected, skeleton))
+    return lines
+
+
+def iter_filter_refs(filt: dict):
+    """产出表达式树中的字面引用：(路径, None) 为 under、(None, 标签名) 为 tag。"""
+    op = filt["op"]
+    if op == "under":
+        yield filt["path"], None
+    elif op == "tag":
+        yield None, filt["tag"]
+    elif op in ("and", "or"):
+        for child in filt["children"]:
+            yield from iter_filter_refs(child)
+    else:  # not
+        yield from iter_filter_refs(filt["child"])
+
+
+def compile_filter(unders, tags, excludes) -> dict:
+    """CLI 快捷参数编译为规范表达式树：多锚点并集(or)、锚点×标签交集(and)、排除差集(and+not)。
+
+    规范形态：and children 依次为 锚点组（多锚点以 or 包裹，单锚点退化为裸 under
+    节点）→ 标签 → 排除（not 包裹），各组内按确定性排序去重；仅一个维度时退化
+    为裸节点。调用方保证 unders 与 tags 至少一项非空（纯排除无被减对象）。
+    """
+    u_sorted = sorted({"/".join(split_rel_path(u)) for u in unders}, key=sort_key)
+    t_sorted = sorted(set(tags), key=sort_key)
+    e_sorted = sorted({"/".join(split_rel_path(e)) for e in excludes}, key=sort_key)
+    children: list[dict] = []
+    if len(u_sorted) == 1:
+        children.append({"op": "under", "path": u_sorted[0]})
+    elif u_sorted:
+        children.append({"op": "or", "children": [{"op": "under", "path": u} for u in u_sorted]})
+    children.extend({"op": "tag", "tag": t} for t in t_sorted)
+    children.extend({"op": "not", "child": {"op": "under", "path": e}} for e in e_sorted)
+    if len(children) == 1:
+        return children[0]
+    return {"op": "and", "children": children}
+
+
+def eval_filter(filt: dict, tree: dict) -> set[str]:
+    """在 tree.json 全量条目上求值过滤器表达式树，返回选中路径集合。
+
+    under = 锚点自身含入的前缀子树；tag = 带该标签的条目；not = 全量条目
+    （含目录）上的补集；and/or 为子树求值的交/并。hidden 不在此层处理
+    （渲染层统一跳过，选中集语义与数据层一致）。
+    """
+    op = filt["op"]
+    if op == "under":
+        anchor = filt["path"]
+        return {p for p, _ in walk_entries(tree, []) if p == anchor or p.startswith(anchor + "/")}
+    if op == "tag":
+        return {p for p, node in walk_entries(tree, []) if filt["tag"] in node.get("tags", [])}
+    if op == "and":
+        return set.intersection(*(eval_filter(c, tree) for c in filt["children"]))
+    if op == "or":
+        return set.union(*(eval_filter(c, tree) for c in filt["children"]))
+    return {p for p, _ in walk_entries(tree, [])} - eval_filter(filt["child"], tree)
 
 
 def find_node(tree: dict, parts: list[str]) -> dict | None:
@@ -493,6 +590,12 @@ def find_node(tree: dict, parts: list[str]) -> dict | None:
             return None
         node = node["children"][part]
     return node
+
+
+def is_tree_dir(tree: dict, path: str) -> bool:
+    """path 是否为树中已存在的目录条目（under 引用预检与渲染层悬空判定共用）。"""
+    node = find_node(tree, split_rel_path(path))
+    return node is not None and is_dir(node)
 
 
 def effective_git_ignore(tree: dict, path: str) -> bool:
@@ -1193,22 +1296,38 @@ class TreeTool:
             return f"not({TreeTool._filter_summary(filt['child'])})"
         return repr(filt)
 
-    def _view_renderable(self, view_id: str, spec: dict, data: dict) -> tuple[str, list[str]] | None:
-        """返回 (剪影内容, 锚点段)；不可渲染（锚点悬空/过滤器超范围/锚点非目录）时
-        打印告警并返回 None——渲染管线跳过该视图而非整体失败，坏配置留给
-        view-list 呈现与后续 check 诊断。
+    def _validate_view_filter(self, data: dict, filt: dict) -> None:
+        """过滤器引用预检（写盘前；T1 校验时机裁定：只在创建入口，不进 normalize_data）。
+
+        under 引用必须是树中已存在的目录条目、tag 必须已在词表登记，否则拒绝
+        ——不落盘、不留撤销历史。数据操作（rm/mv 等）不经过此处，悬空配置是
+        合法中间态，由渲染层跳过 + check 诊断兜底。
+        """
+        for path, tag in iter_filter_refs(filt):
+            if path is not None:
+                node = find_node(data["tree"], split_rel_path(path))
+                if node is None or not is_dir(node):
+                    raise ToolError(f"过滤器 under 引用不是树中目录条目: {path}")
+            elif tag not in data.get("tags", {}):
+                raise ToolError(f"过滤器 tag 引用未登记标签: {tag}（先 tag-add 登记再使用）")
+
+    def _view_renderable(self, view_id: str, spec: dict, data: dict) -> str | None:
+        """返回剪影内容；不可渲染时打印告警并返回 None——渲染管线跳过该视图而非整体失败。
+
+        悬空 under 引用（数据操作后的合法中间态，如锚点被 rm）跳过渲染，坏配置
+        留给 view-list 呈现与 check 诊断；tag 引用未登记不在此拦截——自然求值为
+        空集（空剪影仅剩根名行），check 归诊断票。
         """
         filt = spec.get("filter", {})
-        if filt.get("op") != "under":
-            print(f"警告: 视图 {view_id} 过滤器非单 under 锚点，跳过渲染（当前版本渲染仅支持单锚点）", file=sys.stderr)
-            return None
-        parts = split_rel_path(filt["path"])
-        anchor = find_node(data["tree"], parts)
-        if anchor is None or not is_dir(anchor):
-            print(f"警告: 视图 {view_id} 锚点不在树中或非目录: {filt['path']}，跳过渲染", file=sys.stderr)
+        dangling = sorted(
+            {p for p, _tag in iter_filter_refs(filt) if p is not None and not is_tree_dir(data["tree"], p)},
+            key=sort_key,
+        )
+        if dangling:
+            print(f"警告: 视图 {view_id} 过滤器 under 引用不在树中或非目录: {', '.join(dangling)}，跳过渲染", file=sys.stderr)
             return None
         name, _custom = self.current_root_name()
-        return render_silhouette(name, data["tree"], parts), parts
+        return render_silhouette(name, data["tree"], eval_filter(filt, data["tree"]))
 
     @staticmethod
     def _plan_view_block(text: str, begin: str, end: str, content: str, target_line: int | None) -> str:
@@ -1236,10 +1355,9 @@ class TreeTool:
         的文档为基准）；块已存在无 target_line → 原地替换内容；块不存在 →
         按 target_line 插入或追加尾部。绑定文档缺失时跳过（不凭空创建）。
         """
-        made = self._view_renderable(view_id, spec, data)
-        if made is None:
+        content = self._view_renderable(view_id, spec, data)
+        if content is None:
             return []
-        content, _parts = made
         begin, end = view_tree_markers(view_id)
         updated: list[Path] = []
         for doc_rel in spec.get("docs", []):
@@ -1263,9 +1381,13 @@ class TreeTool:
             updated += self._render_view(view_id, spec, data)
         return updated
 
-    def view_add(self, view_id: str, under: str, doc: str | None = None, line: int | None = None) -> None:
-        """登记/更新视图（单目录锚点）：落盘配置 + 渲染绑定文档。
+    def view_add(self, view_id: str, unders=None, tags=None, excludes=None, filt=None, doc=None, line=None) -> None:
+        """登记/更新视图：过滤器表达式树落盘 + 渲染绑定文档。
 
+        过滤器来源二选一：filt（清单文件承载的任意布尔组合）或快捷参数编译
+        （unders 多锚点并集、× tags 交集、减 excludes 差集 → 规范表达式树），
+        两者互斥。写盘前预检：表达式结构规范化、引用校验（under 须树中目录、
+        tag 须已登记）——拒绝不落盘不留历史；选中 0 条告警放行（空视图）。
         同 id 重复执行 = upsert：过滤器与绑定文档清单替换为本次参数；块已存在
         时默认原地更新，--line 给定时重定位。一次变更 = 一步撤销历史（快照含
         受影响文档全文，undo/redo 连同块位置一并恢复）。
@@ -1276,28 +1398,38 @@ class TreeTool:
             raise ToolError(f"视图 id 语法非法（[a-z0-9][a-z0-9_-]{{0,63}}）: {view_id!r}")
         if view_id == VIEW_ID_RESERVED:
             raise ToolError("视图 id 'default' 是默认视图保留字，不可登记")
+        unders = list(unders or [])
+        tags = list(tags or [])
+        excludes = list(excludes or [])
+        if filt is not None:
+            if unders or tags or excludes:
+                raise ToolError("--filter 清单与快捷参数（--under/--tag/--exclude）互斥，二选一")
+            expr = filt
+        else:
+            if not unders and not tags:
+                raise ToolError("过滤器缺范围来源：至少给一个 --under 或 --tag，或改用 --filter 清单承载完整表达式")
+            expr = compile_filter(unders, tags, excludes)
+        expr = _normalize_filter(expr)  # 结构校验 + 归一（清单原始 JSON 收敛为规范形态）
         data = self.load()
-        under_parts = split_rel_path(under)
-        anchor = find_node(data["tree"], under_parts)
-        if anchor is None or not is_dir(anchor):
-            raise ToolError(f"--under 不是树中目录条目: {under}")
+        self._validate_view_filter(data, expr)  # 引用预检：拒绝保持原子（T1 拒绝原子性模式）
         docs_list: list[str] = []
         if doc is not None:
             doc_rel = "/".join(split_rel_path(doc))
             if not self._doc_path(doc_rel).is_file():
                 raise ToolError(f"绑定文档不存在（先创建文档再登记视图）: {doc_rel}")
             docs_list = [doc_rel]
+        if not eval_filter(expr, data["tree"]):
+            print(f"警告: 视图 {view_id} 过滤器选中 0 条（空视图：渲染仅剩根名行）")
         candidate = dict(data)
         views = {k: dict(v) for k, v in data.get("views", {}).items()}
-        views[view_id] = {"filter": {"op": "under", "path": "/".join(under_parts)}}
+        views[view_id] = {"filter": expr}
         if docs_list:
             views[view_id]["docs"] = docs_list
         candidate["views"] = views
         normalize_data(candidate)  # 写前预检（render_overrides 等手改在此拦截，拒绝不留半截历史）
         if docs_list:  # 渲染计划 dry-run：行号越界/孤立标记等在落盘前暴露，拒绝保持原子
-            made = self._view_renderable(view_id, views[view_id], data)
-            if made is not None:
-                content, _parts = made
+            content = self._view_renderable(view_id, views[view_id], data)
+            if content is not None:
                 begin, end = view_tree_markers(view_id)
                 for doc_rel in docs_list:
                     text = self._read_doc(doc_rel)
@@ -1688,8 +1820,33 @@ def _cmd_tag_rm(tool: TreeTool, args) -> None:
     print(f"已删除标签并重渲染: {args.name}")
 
 
+def _load_filter_manifest(manifest_str: str):
+    """读取 --filter 清单：顶层对象含 filter 键（表达式树原样交由 view-add 校验归一）。"""
+    manifest = Path(manifest_str)
+    try:
+        raw = manifest.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ToolError(f"清单文件不可读: {manifest}（{exc}）")
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ToolError(f"清单 JSON 解析失败: {exc}")
+    if not isinstance(obj, dict) or "filter" not in obj:
+        raise ToolError('清单顶层须为对象且含 "filter" 键，如 {"filter": {"op": "under", "path": "apps"}}')
+    return obj["filter"]
+
+
 def _cmd_view_add(tool: TreeTool, args) -> None:
-    tool.view_add(args.view_id, under=args.under, doc=args.doc, line=args.line)
+    filt = _load_filter_manifest(args.filter) if args.filter else None
+    tool.view_add(
+        args.view_id,
+        unders=args.under,
+        tags=args.tag,
+        excludes=args.exclude,
+        filt=filt,
+        doc=args.doc,
+        line=args.line,
+    )
     target = f" -> {args.doc}" + (f"（围栏首行第 {args.line} 行）" if args.line else "") if args.doc else ""
     print(f"已登记视图并渲染: {args.view_id}{target}（一次变更，单步历史）")
 
@@ -1828,9 +1985,18 @@ def main(argv=None) -> int:
     p = sub.add_parser("tag-rm", help="删除受控标签（被使用时拒绝）")
     p.add_argument("name")
 
-    p = sub.add_parser("view-add", help="登记/更新视图（单目录锚点）：把子树剪影渲染到绑定文档的带 id 标记块")
+    p = sub.add_parser(
+        "view-add",
+        help="登记/更新视图：把过滤器选中集的剪影渲染到绑定文档的带 id 标记块",
+    )
     p.add_argument("view_id", help="视图 id：[a-z0-9][a-z0-9_-]{0,63}，保留字 default 不可用")
-    p.add_argument("--under", required=True, help="目录锚点（树中已存在的目录条目）")
+    p.add_argument("--under", action="append", help="目录锚点（树中已存在的目录条目），可重复：多锚点为并集")
+    p.add_argument("--tag", action="append", help="已登记标签，可重复：锚点×标签为交集（多标签同为交集）")
+    p.add_argument("--exclude", action="append", help="排除的目录锚点（差集：选中集减其子树），可重复")
+    p.add_argument(
+        "--filter",
+        help='过滤器清单 JSON 路径（任意布尔组合），顶层为 {"filter": {"op": "and", ...}}；与快捷参数互斥',
+    )
     p.add_argument("--doc", help="绑定文档（仓库相对路径，需已存在；缺省仅落盘配置不渲染）")
     p.add_argument("--line", type=int, help="围栏首行落点：插在当前第 N 行内容之前（1-based，越界报错）；省略则块存在原地更新、缺失追加文档尾部；同 id 已有块时重定位以删除旧块后的行号为准")
 
