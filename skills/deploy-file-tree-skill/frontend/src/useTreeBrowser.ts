@@ -73,9 +73,12 @@ export function useTreeBrowser(hierarchyOpen = false) {
   // 初始加载：根信息 + 根级子项（仅一级，深层按需拉取）；
   // root 响应确认首个后端世代，此后旧世代响应一律按章丢弃。
   // 跨标签页并发刷新可能夹在 root 与 children 两次服务端读之间：
-  // 世代不一致即整体重取（有界重试），超限则以 children 世代为准重取 root
+  // 世代不一致即整体重取（有界重试），超限则以 children 世代为准重取 root。
+  // 发起时捕获 epoch：等待期间用户完成刷新（bump）后，迟到的初始响应
+  // 整体作废——刷新链路已按新世代重建全部数据，不得旧盖新（R4）。
   useEffect(() => {
     let cancelled = false;
+    const epoch = epochGuard.current();
     (async () => {
       try {
         let [root, top] = await Promise.all([api.root(), api.children("")]);
@@ -86,7 +89,7 @@ export function useTreeBrowser(hierarchyOpen = false) {
         if (root.generation !== top.generation) {
           root = await api.root(); // 超限兜底：树数据以 children 世代为准，root 尽力对齐
         }
-        if (cancelled) return;
+        if (cancelled || !epochGuard.isCurrent(epoch)) return;
         generationGate.adopt(Math.max(root.generation, top.generation));
         setRootInfo(root);
         setChildrenCache(new Map([["", top.children]]));
@@ -97,7 +100,7 @@ export function useTreeBrowser(hierarchyOpen = false) {
     return () => {
       cancelled = true;
     };
-  }, [generationGate]);
+  }, [generationGate, epochGuard]);
 
   /** 拉取条目详情（A1 抽取为可复用：选中 effect 与刷新成功后的重拉共用）。
    * seq 防同代乱序，epoch 防跨版本旧响应，generation 防新 epoch 携旧快照
@@ -233,7 +236,12 @@ export function useTreeBrowser(hierarchyOpen = false) {
       const epoch = epochGuard.current();
       try {
         for (const dir of ancestors(path)) {
-          if (!childrenCache.has(dir) && !(await loadChildren(dir))) return;
+          // false = 响应被世代门/epoch 拦下（多与刷新并发）：不定位且必须留提示，
+          // 否则搜索命中/关联跳转表现为"点了没反应"（R7）
+          if (!childrenCache.has(dir) && !(await loadChildren(dir))) {
+            setNotice("快照已更新，请重新定位");
+            return;
+          }
         }
       } catch (err) {
         if (navigation !== navigationSeq.current || !epochGuard.isCurrent(epoch)) return;
@@ -331,7 +339,8 @@ export function useTreeBrowser(hierarchyOpen = false) {
 
   /**
    * 手动刷新（G12）：POST /api/refresh 成功后整缓存重建（同一新世代），
-   * 仍存在的展开目录与选中尽量保留；已删除路径按回退规则处理并提示。
+   * 仍存在的展开目录与选中保留——两者均按刷新期间的最新操作为准（ref 实时读）；
+   * 已删除路径按回退规则处理并提示。
    * 失败：报错并明确标示当前仍是旧数据；世代门闩作废全部在途回调，
    * 但被作废的在途详情与展开目录请求必须有重拉路径（A1/B4），loading
    * 不得因作废而永久卡住（A1/A2）。
@@ -362,10 +371,12 @@ export function useTreeBrowser(hierarchyOpen = false) {
       generationGate.adopt(top.generation);
       newCache.set("", top.children);
       const attempted = new Set([""]);
-      // 刷新期间可改选；每次请求后重新读取当前链，而不是冻结点击刷新时的路径。
+      // 刷新期间用户可继续操作：展开集与选中同样每次请求后读 ref 取最新，
+      // 不冻结点击刷新那一刻的快照——否则刷新期间新展开的目录不参与重建、
+      // 完成后被整体折叠，与失败路径的 expandedRef 处理也不一致（R3）。
       const requiredDirectories = () => {
         const current = selectedRef.current;
-        const dirs = new Set(expanded);
+        const dirs = new Set(expandedRef.current);
         if (current) {
           for (const dir of ancestors(current)) dirs.add(dir);
           const parent = current.split("/").slice(0, -1).join("/");
@@ -391,7 +402,7 @@ export function useTreeBrowser(hierarchyOpen = false) {
       }
 
       const outcome = reconcileAfterRefresh({
-        expanded,
+        expanded: expandedRef.current,
         selected: selectedRef.current,
         exists: (p) => existsInCache(newCache, p),
       });
@@ -460,7 +471,6 @@ export function useTreeBrowser(hierarchyOpen = false) {
     }
   }, [
     refreshing,
-    expanded,
     selected,
     searchResult,
     childrenCache,
@@ -483,16 +493,24 @@ export function useTreeBrowser(hierarchyOpen = false) {
 
   const rootChildren = childrenCache.get("");
 
-  /** 补齐树的祖先展开意图，不改变选中、历史或搜索内容。 */
+  /** 补齐树的祖先展开意图，不改变选中、历史或搜索内容。
+   * 祖先已全部展开时返回原 Set 引用，避免无谓的行重算。 */
   const revealSelection = useCallback(() => {
     if (!selected) return;
-    setExpanded((current) => new Set([...current, ...ancestors(selected)]));
-    for (const dir of ancestors(selected)) {
+    const chain = ancestors(selected);
+    setExpanded((current) =>
+      chain.every((dir) => current.has(dir)) ? current : new Set([...current, ...chain]),
+    );
+    for (const dir of chain) {
       if (!childrenCache.has(dir)) void loadChildren(dir).catch(() => {});
     }
   }, [selected, childrenCache, loadChildren]);
 
-  useEffect(() => { revealSelection(); }, [revealSelection]);
+  // 只随选中变化补齐：若随 childrenCache 变化重跑，用户对选中祖先的显式
+  // 折叠会在下一次任意懒加载完成后被静默弹回（R1）。后续缓存内容经 ref 读取。
+  const revealSelectionRef = useRef(revealSelection);
+  revealSelectionRef.current = revealSelection;
+  useEffect(() => { revealSelectionRef.current(); }, [selected]);
 
   const back = useCallback(() => { navigationSeq.current += 1; setLeftView("tree"); setHistory((h) => goBack(h)); }, []);
   const forward = useCallback(() => { navigationSeq.current += 1; setLeftView("tree"); setHistory((h) => goForward(h)); }, []);

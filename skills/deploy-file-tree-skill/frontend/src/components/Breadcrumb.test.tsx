@@ -17,7 +17,10 @@ describe("Breadcrumb", () => {
     );
     expect(container.querySelector(".breadcrumb")).not.toBeNull();
     expect(container.querySelector(".crumb")?.textContent).toBe("演示仓库");
-    expect((container.querySelector(".copy-button") as HTMLButtonElement).disabled).toBe(true);
+    const copyButton = container.querySelector(".copy-button") as HTMLButtonElement;
+    expect(copyButton.disabled).toBe(true);
+    // 禁用态提示不得暴露实现字面量（如 "复制完整路径：null"）
+    expect(copyButton.title).toBe("复制完整路径");
   });
 
   it("按路径分段渲染：根可点、各级目录可点、末级为当前条目", () => {
