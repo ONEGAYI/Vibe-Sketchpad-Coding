@@ -27,5 +27,19 @@
     },
     "repeated_build": "assemble_viewer reported no changes after repeated npm run build",
     "source_rule": "frontend/src/assets/.gitattributes: *.svg text eol=lf"
+  },
+  "post_review_build": {
+    "hashes": {
+      ".gitattributes": "7c6793a08292d2b87eb85ee8b2d8777cdf054c8320b5eb652544dabc3f908362",
+      "assets/drawer-closed-BEXoh82F.svg": "8df93803e881935557db9da3c12c973f4e9baccd8922079b08099a2613a4c1b0",
+      "assets/drawer-open-C8SjXDXq.svg": "96323653612155e5a0f92863edcea9a3112d3c73ff92ecf979dc11c57a97b9fa",
+      "assets/index-B2Xy6itf.css": "f97556a241678fd9cb519f1a16c5e07ef8555781fae2e28327f6d465347f70d4",
+      "assets/index-BIcMovCg.js": "8c232fe64f588d27803d42db96f2b7c25b13aef60326e2c5ae6f60689806d3a4",
+      "index.html": "661ef9c0aac41bfb16ed253310df69d0cf99234264f480f505948a0a17cb5f95"
+    },
+    "repeated_assembly": "assemble_viewer reported no changes after build and deployment",
+    "frontend_tests": 112,
+    "viewer_tests": 123,
+    "deploy_tests": 32
   }
 }
