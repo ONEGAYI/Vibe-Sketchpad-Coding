@@ -1587,8 +1587,9 @@ class TreeTool:
             docs={doc_rel: self._read_doc(doc_rel)} if docs_list else None,
         )
         self.write_data(candidate)
+        fresh = self.load()
         self._render_view(
-            view_id, self.load()["views"][view_id], self.load(),
+            view_id, fresh["views"][view_id], fresh,
             target_line=line, target_doc=docs_list[0] if docs_list else None,
         )
 
@@ -1637,8 +1638,9 @@ class TreeTool:
                 docs={doc_rel: self._read_doc(doc_rel)},
             )
             self.write_data(candidate)
+            fresh = self.load()
             self._render_view(
-                view_id, self.load()["views"][view_id], self.load(),
+                view_id, fresh["views"][view_id], fresh,
                 target_line=line, target_doc=doc_rel,
             )
         else:
@@ -1662,7 +1664,8 @@ class TreeTool:
             self.write_data(candidate)
             # --rm 也是数据变更：剩余绑定文档照常刷新保持镜像一致
             # （解绑文档不在清单中，其保留的块不再被触碰）
-            self._render_view(view_id, self.load()["views"][view_id], self.load())
+            fresh = self.load()
+            self._render_view(view_id, fresh["views"][view_id], fresh)
 
     def view_rm(self, view_id: str, purge: bool = False) -> int:
         """删除视图实体：默认仅从 views 配置删除（各绑定文档的块原样保留为
@@ -1987,6 +1990,9 @@ class TreeTool:
                 warnings.append(
                     f"W: 视图 {view_id} 当前不可渲染（过滤器 under 引用不在树中或非目录），跳过其绑定文档的块内容比对"
                 )
+            elif not eval_filter(spec.get("filter", {}), data["tree"]):
+                # US19 后半句：空选中在 check 告警（识别"过滤器过窄"），空视图渲染仅剩根名行
+                warnings.append(f"W: 视图 {view_id} 过滤器选中 0 条（过滤器过窄或数据变更后失去全部条目），空视图渲染仅剩根名行")
             for doc_rel in spec.get("docs", []):
                 try:
                     disk_doc = self._doc_path(doc_rel).read_text(encoding="utf-8").replace("\r\n", "\n")
@@ -2253,7 +2259,7 @@ def _load_overrides_manifest(manifest_str: str):
 
 def _cmd_view_add(tool: TreeTool, args) -> None:
     filt = _load_filter_manifest(args.filter) if args.filter else None
-    overrides = _load_overrides_manifest(args.overrides) if getattr(args, "overrides", None) else None
+    overrides = _load_overrides_manifest(args.overrides) if args.overrides else None
     tool.view_add(
         args.view_id,
         unders=args.under,
@@ -2263,10 +2269,10 @@ def _cmd_view_add(tool: TreeTool, args) -> None:
         doc=args.doc,
         line=args.line,
         overrides=overrides,
-        collapse=getattr(args, "collapse", None),
-        expand=getattr(args, "expand", None),
-        hide=getattr(args, "hide", None),
-        show=getattr(args, "show", None),
+        collapse=args.collapse,
+        expand=args.expand,
+        hide=args.hide,
+        show=args.show,
     )
     target = f" -> {args.doc}" + (f"（围栏首行第 {args.line} 行）" if args.line else "") if args.doc else ""
     print(f"已登记视图并渲染: {args.view_id}{target}（一次变更，单步历史）")

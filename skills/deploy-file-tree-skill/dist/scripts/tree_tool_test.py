@@ -4608,6 +4608,23 @@ class CheckViewDiagnosisTest(ViewSandboxTest):
         tool.render()
         self.assertEqual(tool.check(), ([], []))
 
+    def test_empty_selection_check_warns(self):
+        # US19 后半句：空选中视图 view-add 告警放行后，check 也告警（识别"过滤器过窄"）
+        # make_view_data 的 doc 标签已登记但无条目使用 → tag 求值为空集（合法过滤器）
+        import io
+        from contextlib import redirect_stdout
+
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            tool.view_add("v", filt={"op": "tag", "tag": "doc"}, doc="docs/a.md")
+        tool.render()
+        self.assertIn("0 条", buf.getvalue())  # view-add 侧告警放行（T2 已交付）
+        errors, warnings = tool.check()
+        self.assertEqual(errors, [])  # 空集是告警不是错误
+        hits = [w for w in warnings if "视图 v" in w and "0 条" in w]
+        self.assertEqual(len(hits), 1)
+
     def test_missing_block_reported(self):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
         self.bind_one(tool)
@@ -4786,6 +4803,7 @@ class CmdViewTest(FilterSandboxTest):
         tool = self.make_filter_tool(docs={"docs/a.md": "# A\n"})
         args = types.SimpleNamespace(
             view_id="v", under=["apps"], tag=None, exclude=None, filter=None, doc="docs/a.md", line=None,
+            overrides=None, collapse=None, expand=None, hide=None, show=None,
         )
         buf = io.StringIO()
         with redirect_stdout(buf):
@@ -4801,6 +4819,7 @@ class CmdViewTest(FilterSandboxTest):
         args = types.SimpleNamespace(
             view_id="v", under=["docs", "apps"], tag=["doc"], exclude=["apps/ui"],
             filter=None, doc="docs/a.md", line=None,
+            overrides=None, collapse=None, expand=None, hide=None, show=None,
         )
         _cmd_view_add(tool, args)
         self.assertEqual(tool.load()["views"]["v"]["filter"], {
@@ -4824,6 +4843,7 @@ class CmdViewTest(FilterSandboxTest):
         args = types.SimpleNamespace(
             view_id="v", under=None, tag=None, exclude=None,
             filter=str(manifest), doc="docs/a.md", line=None,
+            overrides=None, collapse=None, expand=None, hide=None, show=None,
         )
         _cmd_view_add(tool, args)
         self.assertEqual(tool.load()["views"]["v"]["filter"], {"op": "tag", "tag": "core"})
@@ -4862,6 +4882,7 @@ class CmdViewTest(FilterSandboxTest):
         tool = self.make_view_tool(docs={"docs/a.md": "# A\n\nL1\nL2\nL3\n"})
         args = types.SimpleNamespace(
             view_id="v", under=["apps"], tag=None, exclude=None, filter=None, doc="docs/a.md", line=2,
+            overrides=None, collapse=None, expand=None, hide=None, show=None,
         )
         _cmd_view_add(tool, args)
         self.assertEqual(self.doc_text(tool, "docs/a.md").split("\n")[1], "```")
