@@ -153,6 +153,8 @@ ssh -L 8618:127.0.0.1:8618 user@server
 
 ## 部署后引导（转告目标仓库的使用者）
 
+新版 GUI 的侧栏拖拽限位、抽屉80%层级浏览、根概览与搜索返回规则见 [README](README.md#文件树阅读与层级浏览)。Windows / Python 3.13.9 / Edge 152 的离线发行、真实交互和大样本结果见 [验收报告](docs/gui-redesign-verification.md)；这组证据不代替旧 Linux 运行时兼容性验证。
+
 - 录入条目：`python .agents/skills/file-tree/scripts/tree_tool.py add <path> -d "一句话" --detail "完整描述"`
 - 录入目录（整目录粗粒度收录）：同命令加 `--dir`，批量清单条目写 `"dir": true`；磁盘目录未声明时脚本也会自动识别并提示
 - 全量校验：`... check --strict`（新仓库会提示 git 文件未收录，属正常，逐条 add 即可）

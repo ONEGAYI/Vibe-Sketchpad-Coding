@@ -22,11 +22,10 @@ export function Breadcrumb({ rootName, selected, onNavigate }: BreadcrumbProps) 
     };
   }, []);
 
-  if (selected === null) return null;
-
-  const parts = selected.split("/").filter(Boolean);
+  const parts = (selected ?? "").split("/").filter(Boolean);
 
   const onCopy = async () => {
+    if (!selected) return;
     const ok = await copyText(selected);
     setCopied(ok);
     if (timerRef.current !== undefined) window.clearTimeout(timerRef.current);
@@ -61,6 +60,7 @@ export function Breadcrumb({ rootName, selected, onNavigate }: BreadcrumbProps) 
       <button
         type="button"
         className="copy-button"
+        disabled={!selected}
         onClick={onCopy}
         title={`复制完整路径：${selected}`}
       >

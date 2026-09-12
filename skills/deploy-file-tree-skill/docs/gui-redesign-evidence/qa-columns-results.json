@@ -1,0 +1,9 @@
+{
+  "geometry": {
+    "nav": 819.1875,
+    "main": 1033,
+    "divider": 9
+  },
+  "errors": [],
+  "checks": "80%, width restore, draft retention, deep columns, keyboard, empty, branch prune, narrow"
+}

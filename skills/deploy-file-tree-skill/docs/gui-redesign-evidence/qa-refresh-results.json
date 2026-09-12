@@ -1,0 +1,4 @@
+{
+  "notice": "刷新后原选中条目 alpha/deep/很长的文件名称-用于检查多列省略与完整路径可访问性-abcdefghijklmnopqrstuvwxyz.md 已不存在，已回退到仍存在的目录 alpha/deep\n×",
+  "checks": "selected deletion parent fallback, empty column, failed refresh retains usable data, recover refresh, collapse selection"
+}

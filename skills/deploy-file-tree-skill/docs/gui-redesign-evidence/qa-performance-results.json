@@ -1,0 +1,44 @@
+[
+  {
+    "label": "10k",
+    "port": "4861",
+    "dir": "src",
+    "browser": "152.0.4191.66",
+    "initialMs": 129.41299999999995,
+    "treeMs": 59.07140000000004,
+    "columnsMs": 25.940799999999967,
+    "treeRows": 31,
+    "columnRows": 41,
+    "columnViewports": 2,
+    "maxRowsPerColumn": 28,
+    "errors": []
+  },
+  {
+    "label": "100k",
+    "port": "4862",
+    "dir": "src",
+    "browser": "152.0.4191.66",
+    "initialMs": 93.42770000000007,
+    "treeMs": 52.99420000000009,
+    "columnsMs": 21.775099999999952,
+    "treeRows": 31,
+    "columnRows": 41,
+    "columnViewports": 2,
+    "maxRowsPerColumn": 28,
+    "errors": []
+  },
+  {
+    "label": "fanout",
+    "port": "4863",
+    "dir": "大目录",
+    "browser": "152.0.4191.66",
+    "initialMs": 83.97800000000007,
+    "treeMs": 837.0531000000003,
+    "columnsMs": 26.765100000000075,
+    "treeRows": 31,
+    "columnRows": 29,
+    "columnViewports": 2,
+    "maxRowsPerColumn": 28,
+    "errors": []
+  }
+]
