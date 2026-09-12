@@ -2679,7 +2679,7 @@ class FilterSandboxTest(ViewSandboxTest):
 
 
 class ViewsSchemaTest(SandboxTest):
-    """views 顶层键的 schema 契约：id 语法、过滤器表达式树、render_overrides 拒绝、规范化。"""
+    """views 顶层键的 schema 契约：id 语法、过滤器表达式树、render_overrides 结构校验、规范化。"""
 
     def test_normalize_validates_views_structure(self):
         ok_filter = {"op": "under", "path": "apps"}
@@ -2734,30 +2734,41 @@ class ViewsSchemaTest(SandboxTest):
                 with self.assertRaises(ToolError):
                     normalize_data({**make_view_data(), "views": {"v": {"filter": filt}}})
 
-    def test_render_overrides_rejected_as_phase2(self):
-        data = {**make_view_data(), "views": {
-            "v": {"filter": {"op": "under", "path": "apps"}, "docs": ["a.md"], "render_overrides": {}}
-        }}
-        with self.assertRaises(ToolError) as ctx:
-            normalize_data(data)
-        self.assertIn("二期功能，当前版本不支持", str(ctx.exception))
+    def test_render_overrides_rejected_bad_structure(self):
+        # 二期正式消费：合法结构放行（见 RenderOverridesSchemaTest），仅结构非法在此拦截
+        ok_filter = {"op": "under", "path": "apps"}
+        bad_overrides = (
+            [],                                              # 非对象
+            {"apps": []},                                    # 覆盖项非对象
+            {"apps": {}},                                    # 覆盖项空对象（无字段即无语义，手改信号）
+            {"apps": {"collapsed": True, "why": 1}},         # 未知字段
+            {"apps": {"collapsed": "yes"}},                  # 非布尔
+            {"apps": {"hidden": 1}},                         # 非布尔
+            {"/abs": {"hidden": True}},                      # 非法路径键
+            {"a/../b": {"hidden": True}},                    # 非法路径键
+        )
+        for overrides in bad_overrides:
+            with self.subTest(overrides=overrides):
+                with self.assertRaises(ToolError):
+                    normalize_data({**make_view_data(), "views": {
+                        "v": {"filter": ok_filter, "docs": ["a.md"], "render_overrides": overrides}
+                    }})
 
-    def test_hand_edited_render_overrides_blocks_view_add(self):
-        # 手改 tree.json 注入 render_overrides：view-add 在落盘规范化处被拦截，且保持原子
+    def test_hand_edited_bad_overrides_blocks_view_add(self):
+        # 手改 tree.json 注入结构非法的 render_overrides：view-add 在落盘规范化处被拦截，且保持原子
         tool = self.make_tool(data=make_view_data())
         doc_path = tool.repo_root / "docs" / "a.md"
         doc_path.parent.mkdir(parents=True, exist_ok=True)
         doc_path.write_text("# A\n", encoding="utf-8", newline="\n")
         data = tool.load()
-        data["views"] = {"v": {"filter": {"op": "under", "path": "apps"}, "render_overrides": {}}}
+        data["views"] = {"v": {"filter": {"op": "under", "path": "apps"}, "render_overrides": {"apps": {"bogus": True}}}}
         tool.tree_json.write_text(
             json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n",
             encoding="utf-8", newline="\n",
         )
         before = tool.tree_json.read_text(encoding="utf-8")
-        with self.assertRaises(ToolError) as ctx:
+        with self.assertRaises(ToolError):
             tool.view_add("other", unders=["apps"], doc="docs/a.md")
-        self.assertIn("二期功能，当前版本不支持", str(ctx.exception))
         self.assertEqual(tool.tree_json.read_text(encoding="utf-8"), before)  # 拒绝保持原子
         undo_ops, _ = tool.history_summary()
         self.assertEqual(undo_ops, [])  # 无半截历史
@@ -3456,6 +3467,395 @@ class ViewSilhouetteProjectionTest(FilterSandboxTest):
         out = render_silhouette("Demo", tree, {"apps/ui/button.tsx"})
         self.assertIn("button.tsx", out)
         self.assertNotIn("apps/…", out)
+
+
+class RenderOverridesSchemaTest(SandboxTest):
+    """render_overrides 的 schema 契约（二期）：合法结构规范化、false 语义值落盘、空集剔除。"""
+
+    def test_normalize_accepts_and_normalizes(self):
+        data = {**make_view_data(), "views": {
+            "v": {
+                "filter": {"op": "under", "path": "apps"},
+                "docs": ["a.md"],
+                "render_overrides": {
+                    "apps\\ui": {"hidden": False, "collapsed": True},   # 路径归一 + 字段定序
+                    "apps/main.tsx": {"hidden": True},
+                    "Cargo.toml": {"collapsed": False},                  # false 是语义值（双向覆盖），保留落盘
+                },
+            }
+        }}
+        out = normalize_data(data)
+        self.assertEqual(out["views"]["v"]["render_overrides"], {
+            "Cargo.toml": {"collapsed": False},
+            "apps/main.tsx": {"hidden": True},
+            "apps/ui": {"collapsed": True, "hidden": False},
+        })
+        # 实体键序：filter → docs → render_overrides
+        self.assertEqual(list(out["views"]["v"]), ["filter", "docs", "render_overrides"])
+
+    def test_empty_render_overrides_dropped(self):
+        data = {**make_view_data(), "views": {
+            "v": {"filter": {"op": "under", "path": "apps"}, "render_overrides": {}}
+        }}
+        out = normalize_data(data)
+        self.assertNotIn("render_overrides", out["views"]["v"])  # 空集剔除（与 docs 空省略键一致）
+
+    def test_paths_sorted_deterministically(self):
+        data = {**make_view_data(), "views": {
+            "v": {
+                "filter": {"op": "under", "path": "apps"},
+                "render_overrides": {"apps/ui": {"collapsed": True}, "Cargo.toml": {"hidden": True}},
+            }
+        }}
+        out = normalize_data(data)
+        self.assertEqual(list(out["views"]["v"]["render_overrides"]), ["apps/ui", "Cargo.toml"])
+
+
+class RenderOverridesSilhouetteTest(ViewSandboxTest):
+    """剪影渲染消费 render_overrides：优先级 视图覆盖 > 条目全局字段 > 默认值，布尔双向。"""
+
+    def silhouette(self, tool: TreeTool, anchor: str, overrides: dict | None) -> str:
+        tree = tool.load()["tree"]
+        name, _custom = tool.current_root_name()
+        return render_silhouette(name, tree, select_under(tree, anchor), overrides=overrides)
+
+    def test_collapse_selected_dir_folds(self):
+        # 覆盖折叠选中目录：目录行带 …、选中后代不渲染（与全局 collapsed 同形态）
+        tool = self.make_view_tool()
+        out = self.silhouette(tool, "apps", {"apps/ui": {"collapsed": True}})
+        self.assertIn("ui/…", out)
+        self.assertIn("main.tsx", out)
+        self.assertNotIn("button.tsx", out)
+
+    def test_collapse_skeleton_dir_ignored(self):
+        # 骨架目录强制展开（T2 规则），collapsed 覆盖不破例：折叠会丢选中后代
+        tool = self.make_view_tool()
+        out = self.silhouette(tool, "apps/ui", {"apps": {"collapsed": True}})
+        self.assertIn("apps/", out)
+        self.assertNotIn("apps/…", out)
+        self.assertIn("button.tsx", out)  # 骨架链下的选中后代照常
+
+    def test_expand_globally_collapsed_dir(self):
+        # 反向覆盖：全局 collapsed=true 的选中目录在本视图展开
+        data = make_view_data()
+        data["tree"]["apps"]["children"]["ui"]["collapsed"] = True
+        tool = self.make_tool(data=data)
+        out = self.silhouette(tool, "apps", {"apps/ui": {"collapsed": False}})
+        self.assertNotIn("ui/…", out)
+        self.assertIn("button.tsx", out)
+
+    def test_hide_selected_entry(self):
+        # 正向覆盖：选中文件在本视图隐藏
+        tool = self.make_view_tool()
+        out = self.silhouette(tool, "apps", {"apps/main.tsx": {"hidden": True}})
+        self.assertNotIn("main.tsx", out)
+        self.assertIn("button.tsx", out)
+
+    def test_hide_selected_dir_prunes_subtree(self):
+        # 正向覆盖选中目录：连同子树整体隐藏（与全局 hidden 同语义）
+        tool = self.make_view_tool()
+        out = self.silhouette(tool, "apps", {"apps/ui": {"hidden": True}})
+        self.assertNotIn("ui/", out)
+        self.assertNotIn("button.tsx", out)
+        self.assertNotIn("input.tsx", out)
+        self.assertIn("main.tsx", out)
+
+    def test_show_globally_hidden_entry(self):
+        # 反向覆盖：全局 hidden=true 的选中条目在本视图显示（简介照常）
+        data = make_view_data()
+        data["tree"]["apps"]["children"]["main.tsx"]["hidden"] = True
+        tool = self.make_tool(data=data)
+        out = self.silhouette(tool, "apps", {"apps/main.tsx": {"hidden": False}})
+        self.assertIn("main.tsx # 入口", out)
+        self.assertIn("button.tsx", out)
+
+    def test_show_globally_hidden_dir_reveals_selected_descendants(self):
+        # 反向覆盖全局 hidden 目录：目录恢复显示，其选中后代（求值不排 hidden）一并可见
+        data = make_view_data()
+        data["tree"]["apps"]["children"]["ui"]["hidden"] = True
+        tool = self.make_tool(data=data)
+        out = self.silhouette(tool, "apps", {"apps/ui": {"hidden": False}})
+        self.assertIn("ui/", out)
+        self.assertIn("UI 组件", out)
+        self.assertIn("button.tsx", out)
+        self.assertIn("input.tsx", out)
+
+    def test_globally_hidden_ancestor_prunes_before_descendant_show(self):
+        # 逐节点有效 hidden + 祖先优先剪枝：祖先全局 hidden 无覆盖，后代覆盖 show 不生效
+        data = make_view_data()
+        data["tree"]["apps"]["hidden"] = True
+        tool = self.make_tool(data=data)
+        out = self.silhouette(tool, "apps", {"apps/main.tsx": {"hidden": False}})
+        self.assertEqual(out, "Demo/")  # apps 剪枝整棵子树，main.tsx 的反向覆盖无从生效
+
+    def test_overridden_hidden_ancestor_prunes_before_descendant_show(self):
+        # 祖先被视图覆盖隐藏（含子树语义）：后代覆盖 show 不生效
+        tool = self.make_view_tool()
+        out = self.silhouette(tool, "apps", {
+            "apps/ui": {"hidden": True},
+            "apps/ui/button.tsx": {"hidden": False},
+        })
+        self.assertNotIn("ui", out)
+        self.assertNotIn("button.tsx", out)
+
+    def test_override_absent_from_projection_no_effect(self):
+        # 覆盖不改变选中集：路径不在选中集与骨架中的条目不会因覆盖凭空出现
+        tool = self.make_view_tool()
+        out = self.silhouette(tool, "apps/ui", {"Cargo.toml": {"hidden": False}, "apps": {"collapsed": True}})
+        self.assertNotIn("Cargo.toml", out)  # 视图外条目不因 show 出现
+        self.assertIn("button.tsx", out)     # 骨架 apps 的 collapsed 覆盖被忽略（见骨架测试）
+
+    def test_no_override_keeps_phase1_output(self):
+        # 零回归锚点：无覆盖（None 或空表）与一期渲染逐字节一致
+        tool = self.make_view_tool()
+        expected = self.silhouette(tool, "apps", None)
+        self.assertEqual(self.silhouette(tool, "apps", {}), expected)
+        self.assertIn("ui/", expected)
+        self.assertIn("button.tsx", expected)
+
+
+class RenderOverridesViewAddTest(ViewSandboxTest):
+    """view-add 的覆盖配置入口：快捷参数编译、清单、写盘预检、upsert 与视图间隔离。"""
+
+    def test_shortcut_params_compile_to_overrides(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", unders=["apps"], doc="docs/a.md", collapse=["apps/ui"], hide=["apps/main.tsx"])
+        self.assertEqual(tool.load()["views"]["v"]["render_overrides"], {
+            "apps/main.tsx": {"hidden": True},
+            "apps/ui": {"collapsed": True},
+        })
+        block = self.rendered_block(tool, "v", "docs/a.md")
+        self.assertIn("ui/…", block)          # 折叠生效
+        self.assertNotIn("main.tsx", block)   # 隐藏生效
+
+    def test_show_and_expand_compile_to_false_values(self):
+        data = make_view_data()
+        data["tree"]["apps"]["children"]["ui"]["collapsed"] = True
+        data["tree"]["apps"]["children"]["main.tsx"]["hidden"] = True
+        tool = self.make_tool(data=data)
+        tool.view_add("v", unders=["apps"], show=["apps/main.tsx"], expand=["apps/ui"])
+        self.assertEqual(tool.load()["views"]["v"]["render_overrides"], {
+            "apps/main.tsx": {"hidden": False},
+            "apps/ui": {"collapsed": False},
+        })
+
+    def test_same_path_two_fields_merge(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", unders=["apps"], collapse=["apps/ui"], hide=["apps/ui"])
+        self.assertEqual(tool.load()["views"]["v"]["render_overrides"], {
+            "apps/ui": {"collapsed": True, "hidden": True},
+        })
+
+    def test_same_path_conflicting_shortcuts_rejected_atomically(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        with self.assertRaises(ToolError) as ctx:
+            tool.view_add("v", unders=["apps"], collapse=["apps/ui"], expand=["apps/ui"])
+        self.assertIn("冲突", str(ctx.exception))
+        self.assertNotIn("views", tool.load())      # 拒绝保持原子
+        undo_ops, _ = tool.history_summary()
+        self.assertEqual(undo_ops, [])              # 无半截历史
+
+    def test_overrides_manifest_and_mutex(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        manifest = {
+            "apps/ui": {"collapsed": True},
+            "apps/main.tsx": {"hidden": True},
+        }
+        tool.view_add("v", unders=["apps"], overrides=manifest)
+        self.assertEqual(tool.load()["views"]["v"]["render_overrides"], manifest)
+        with self.assertRaises(ToolError):
+            tool.view_add("w", unders=["apps"], overrides=manifest, hide=["Cargo.toml"])
+        self.assertNotIn("w", tool.load().get("views", {}))
+
+    def test_write_precheck_rejects_dangling_and_file_collapse(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        before = tool.tree_json.read_text(encoding="utf-8")
+        with self.assertRaises(ToolError) as ctx:
+            tool.view_add("v", unders=["apps"], hide=["ghost.md"], doc="docs/a.md")
+        self.assertIn("不在树中", str(ctx.exception))
+        with self.assertRaises(ToolError) as ctx:
+            tool.view_add("v", unders=["apps"], collapse=["apps/main.tsx"], doc="docs/a.md")
+        self.assertIn("目录条目", str(ctx.exception))
+        self.assertEqual(tool.tree_json.read_text(encoding="utf-8"), before)  # 原子
+        self.assertNotIn("file-tree:tree", self.doc_text(tool, "docs/a.md"))  # 块未写
+        undo_ops, _ = tool.history_summary()
+        self.assertEqual(undo_ops, [])
+
+    def test_overrides_do_not_leak_other_views_or_default(self):
+        # 视图间隔离：覆盖只作用于本视图块，其他视图与默认视图（AGENTS.md 简版树）不受影响
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n", "docs/b.md": "# B\n"})
+        tool.view_add("va", unders=["apps"], doc="docs/a.md", collapse=["apps/ui"])
+        tool.view_add("vb", unders=["apps"], doc="docs/b.md")
+        self.assertIn("ui/…", self.rendered_block(tool, "va", "docs/a.md"))
+        self.assertNotIn("ui/…", self.rendered_block(tool, "vb", "docs/b.md"))
+        self.assertIn("button.tsx", self.rendered_block(tool, "vb", "docs/b.md"))
+        brief = tool.render_brief_tree()  # 默认视图渲染不受任何视图覆盖影响
+        self.assertIn("button.tsx", brief)
+        self.assertIn("main.tsx", brief)
+        self.assertNotIn("ui/…", brief)
+
+    def test_data_change_rerender_keeps_overrides(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", unders=["apps"], doc="docs/a.md", collapse=["apps/ui"])
+        tool.add("apps/new.tsx", desc="新文件")
+        tool.render()  # 数据命令的渲染时机在 CLI 层（写后自动重渲染）
+        block = self.rendered_block(tool, "v", "docs/a.md")
+        self.assertIn("ui/…", block)      # 覆盖仍生效
+        self.assertIn("new.tsx", block)   # 新条目照常进入剪影
+
+    def test_upsert_replaces_and_clears_overrides(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", unders=["apps"], doc="docs/a.md", collapse=["apps/ui"], hide=["apps/main.tsx"])
+        tool.view_add("v", unders=["apps"], doc="docs/a.md", hide=["Cargo.toml"])  # upsert 整体替换覆盖
+        self.assertEqual(tool.load()["views"]["v"]["render_overrides"], {"Cargo.toml": {"hidden": True}})
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")  # 不给覆盖参数 = 移除键
+        self.assertNotIn("render_overrides", tool.load()["views"]["v"])
+        self.assertIn("button.tsx", self.rendered_block(tool, "v", "docs/a.md"))  # 回到无覆盖形态
+
+    def test_overrides_never_touch_entry_fields(self):
+        # 覆盖只存于 views 配置：条目全局字段与查询语义不被改写
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", unders=["apps"], hide=["apps/main.tsx"], show=["Cargo.toml"])
+        node = tool.load()["tree"]["apps"]["children"]["main.tsx"]
+        self.assertNotIn("hidden", node)      # 视图隐藏不落条目字段
+        self.assertNotIn("hidden", tool.load()["tree"]["Cargo.toml"])
+        self.assertIn("main.tsx", tool.render_brief_tree())  # 默认视图不受影响
+
+    def test_undo_rolls_back_overrides(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", unders=["apps"], doc="docs/a.md")
+        tool.view_add("v", unders=["apps"], doc="docs/a.md", collapse=["apps/ui"])
+        tool.undo()
+        spec = tool.load()["views"]["v"]
+        self.assertNotIn("render_overrides", spec)
+        self.assertIn("button.tsx", self.rendered_block(tool, "v", "docs/a.md"))  # 块随回滚恢复展开
+
+    def test_dangling_after_rm_renders_on_and_ops_alive(self):
+        # rm 后悬空覆盖是合法中间态（T1 裁定）：渲染静默忽略该项、后续数据操作不被卡死
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        tool.view_add("v", unders=["apps"], doc="docs/a.md", hide=["apps/main.tsx"])
+        tool.rm("apps/main.tsx")
+        block = self.rendered_block(tool, "v", "docs/a.md")
+        self.assertIn("button.tsx", block)   # 其余内容照常渲染
+        tool.add("Cargo.lock", desc="锁文件")  # 数据操作不因悬空覆盖失败
+        errors, _warnings = tool.check()
+        self.assertTrue(any("render_overrides" in e and "不在树中" in e for e in errors))
+
+
+class RenderOverridesCheckTest(SandboxTest):
+    """check 对 render_overrides 的诊断：悬空路径与 collapsed 指向文件为错误；合法覆盖干净通过。"""
+
+    def prepare(self, render_to: str | None = None) -> TreeTool:
+        tool = self.make_tool(data=make_view_data())
+        tool.view_add("v", unders=["apps"], doc=render_to,
+                      overrides={"apps/ui": {"collapsed": True}, "apps/main.tsx": {"hidden": True}})
+        tool.render()  # 渲染默认视图标记块（check 产物一致性校验的前提）
+        return tool
+
+    def test_check_clean_with_valid_overrides(self):
+        tool = self.prepare()
+        errors, warnings = tool.check()
+        self.assertEqual((errors, warnings), ([], []))
+
+    def test_check_reports_dangling_override_path(self):
+        tool = self.prepare()
+        tool.rm("apps/ui")
+        errors, _warnings = tool.check()
+        self.assertTrue(any("render_overrides" in e and "apps/ui" in e for e in errors))
+
+    def test_check_reports_collapsed_on_file_entry(self):
+        # 手改把 collapsed 覆盖指向文件条目：结构合法（布尔/字段名都对），check 按语义报错
+        tool = self.prepare()
+        data = tool.load()
+        data["views"]["v"]["render_overrides"] = {"apps/main.tsx": {"collapsed": True}}
+        tool.tree_json.write_text(
+            json.dumps({"root": "Demo", **data}, ensure_ascii=False, separators=(",", ":")) + "\n",
+            encoding="utf-8", newline="\n",
+        )
+        errors, _warnings = tool.check()
+        self.assertTrue(any("collapsed" in e and "目录" in e for e in errors))
+
+    def test_check_reports_hand_edited_bad_structure(self):
+        tool = self.prepare()
+        data = tool.load()
+        data["views"]["v"]["render_overrides"] = {"apps": {"bogus": True}}
+        tool.tree_json.write_text(
+            json.dumps({"root": "Demo", **data}, ensure_ascii=False, separators=(",", ":")) + "\n",
+            encoding="utf-8", newline="\n",
+        )
+        errors, _warnings = tool.check()
+        self.assertTrue(any("结构非法" in e for e in errors))
+
+
+class CmdRenderOverridesTest(ViewSandboxTest):
+    """CLI 层覆盖参数接线：快捷参数（--collapse/--expand/--hide/--show）与 --overrides 清单。"""
+
+    def make_args(self, tool: TreeTool, **kw):
+        import types
+
+        base = dict(
+            view_id="v", under=["apps"], tag=None, exclude=None, filter=None,
+            doc="docs/a.md", line=None, overrides=None,
+            collapse=None, expand=None, hide=None, show=None,
+        )
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    def test_cmd_wires_shortcut_params(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        _cmd_view_add(tool, self.make_args(tool, collapse=["apps/ui"], hide=["apps/main.tsx"]))
+        self.assertEqual(tool.load()["views"]["v"]["render_overrides"], {
+            "apps/main.tsx": {"hidden": True},
+            "apps/ui": {"collapsed": True},
+        })
+        self.assertIn("ui/…", self.rendered_block(tool, "v", "docs/a.md"))
+
+    def test_cmd_wires_show_and_expand(self):
+        data = make_view_data()
+        data["tree"]["apps"]["children"]["ui"]["collapsed"] = True
+        data["tree"]["apps"]["children"]["main.tsx"]["hidden"] = True
+        tool = self.make_tool(data=data)
+        self.write_doc(tool, "docs/a.md", "# A\n")
+        _cmd_view_add(tool, self.make_args(tool, show=["apps/main.tsx"], expand=["apps/ui"]))
+        self.assertEqual(tool.load()["views"]["v"]["render_overrides"], {
+            "apps/main.tsx": {"hidden": False},
+            "apps/ui": {"collapsed": False},
+        })
+
+    def test_cmd_wires_overrides_manifest(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        manifest = tool.repo_root / "ovr.json"
+        manifest.write_text(
+            json.dumps({"overrides": {"apps/ui": {"collapsed": True}}}, ensure_ascii=False),
+            encoding="utf-8", newline="\n",
+        )
+        _cmd_view_add(tool, self.make_args(tool, overrides=str(manifest), collapse=None))
+        self.assertEqual(tool.load()["views"]["v"]["render_overrides"], {"apps/ui": {"collapsed": True}})
+
+    def test_cmd_rejects_bad_overrides_manifest(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        cases = {
+            "no-key.json": '{"filter": 1}',
+            "not-object.json": '["overrides"]',
+            "broken.json": '{"overrides": ',
+        }
+        for name, content in cases.items():
+            with self.subTest(manifest=name):
+                manifest = tool.repo_root / name
+                manifest.write_text(content, encoding="utf-8", newline="\n")
+                with self.assertRaises(ToolError):
+                    _cmd_view_add(tool, self.make_args(tool, overrides=str(manifest)))
+        with self.assertRaises(ToolError):
+            _cmd_view_add(tool, self.make_args(tool, overrides=str(tool.repo_root / "ghost.json")))
+        self.assertNotIn("views", tool.load())
+
+    def test_cmd_overrides_manifest_mutex_with_shortcuts(self):
+        tool = self.make_view_tool(docs={"docs/a.md": "# A\n"})
+        manifest = tool.repo_root / "ovr.json"
+        manifest.write_text('{"overrides": {}}', encoding="utf-8", newline="\n")
+        with self.assertRaises(ToolError):
+            _cmd_view_add(tool, self.make_args(tool, overrides=str(manifest), hide=["Cargo.toml"]))
+        self.assertNotIn("views", tool.load())
 
 
 class ViewUpsertTest(ViewSandboxTest):
