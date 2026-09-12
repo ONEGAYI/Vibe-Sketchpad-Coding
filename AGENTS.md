@@ -15,6 +15,10 @@ Vibe-Sketchpad-Coding/
 ├── .gitignore  # 通用忽略规则
 ├── AGENTS.md   # agent 规则单一事实源
 ├── CLAUDE.md   # Claude 专属补充规则
+├── CONTEXT.md  # 多视图领域术语表
+├── docs/       # 项目级文档目录
+│   └── adr/ # 架构决策记录（ADR）
+│       └── 0001-views-embedded-in-tree-json.md # 视图配置内嵌决策 ADR
 ├── extensions/ # 宿主扩展成员目录
 │   ├── obsidian/ # Obsidian 扩展目录
 │   │   ├── obsidian-html-latex-fix/… # HTML 内 LaTeX 渲染修复插件
