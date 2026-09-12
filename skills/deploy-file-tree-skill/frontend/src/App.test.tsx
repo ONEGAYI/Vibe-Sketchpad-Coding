@@ -264,6 +264,50 @@ async function settleRefreshGen2() {
 }
 
 describe("浏览布局与控制层页面契约", () => {
+  it("刷新期间新搜索先返回旧世代，换代后保留结果并重查最新意图", async () => {
+    render(<App />);
+    await loadInitialGen1();
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    const refresh = await waitForReq("POST", "/api/refresh");
+    fireEvent.change(screen.getByLabelText("关键词"), { target: { value: "刷新中的查询" } });
+    fireEvent.submit(screen.getByRole("search"));
+    (await waitForReq("GET", "/api/search")).resolve(jsonOk(searchPayload(1, "刷新中的查询", "旧代用户结果")));
+    await screen.findByText("旧代用户结果");
+    refresh.resolve(jsonOk({ ...rootInfoPayload(2, 2), refreshed: true }));
+    (await waitForReq("GET", "/api/children", (q) => q.get("path") === "")).resolve(jsonOk({ generation: 2, path: "", children: [ROOT_DIRX, ROOT_KEEP] }));
+    const renewed = await waitForReq("GET", "/api/search", (q) => q.get("kw") === "刷新中的查询");
+    expect(screen.getByText("旧代用户结果")).toBeDefined();
+    expect(renewed.query.get("page")).toBe("1");
+    renewed.resolve(jsonOk(searchPayload(2, "刷新中的查询", "已换代用户结果")));
+    await screen.findByText("已换代用户结果");
+    expect(screen.queryByText("旧代用户结果")).toBeNull();
+  });
+
+  it("刷新期间新搜索晚回旧世代，重试不会覆盖之后的新世代查询", async () => {
+    render(<App />);
+    await loadInitialGen1();
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    const refresh = await waitForReq("POST", "/api/refresh");
+    fireEvent.change(screen.getByLabelText("关键词"), { target: { value: "查询A" } });
+    fireEvent.submit(screen.getByRole("search"));
+    const late = await waitForReq("GET", "/api/search");
+    refresh.resolve(jsonOk({ ...rootInfoPayload(2, 2), refreshed: true }));
+    (await waitForReq("GET", "/api/children", (q) => q.get("path") === "")).resolve(jsonOk({ generation: 2, path: "", children: [ROOT_DIRX, ROOT_KEEP] }));
+    await screen.findByRole("button", { name: "刷新" });
+    late.resolve(jsonOk(searchPayload(1, "查询A", "迟到旧结果")));
+    const retry = await waitForReq("GET", "/api/search", (q) => q.get("kw") === "查询A");
+    fireEvent.change(screen.getByLabelText("关键词"), { target: { value: "查询B" } });
+    fireEvent.submit(screen.getByRole("search"));
+    (await waitForReq("GET", "/api/search", (q) => q.get("kw") === "查询B")).resolve(jsonOk(searchPayload(2, "查询B", "最新B结果")));
+    await screen.findByText("最新B结果");
+    retry.resolve(jsonOk(searchPayload(2, "查询A", "过时A重试")));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.getByText("最新B结果")).toBeDefined();
+    expect(screen.queryByText("过时A重试")).toBeNull();
+    expect(screen.queryByText("迟到旧结果")).toBeNull();
+    expect(screen.getByRole("button", { name: "搜索" })).toBeDefined();
+  });
+
   it("刷新重建目录遇到旧世代不能提交混合缓存", async () => {
     render(<App />);
     await loadInitialGen1();
