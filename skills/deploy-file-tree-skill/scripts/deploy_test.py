@@ -362,6 +362,46 @@ class DeployTest(unittest.TestCase):
         self.assertEqual((skill / "tree.json").read_bytes(), before)  # 旧排版字节不变
         self.assertEqual((skill / "tree.json").read_text(encoding="utf-8"), legacy_text)
 
+    # ---------- 视图参考文档与视图数据随部署（#33 spec / #40） ----------
+
+    def test_deploy_ships_ten_files_including_views_reference(self):
+        # 固定清单十件：references/views.md（视图完整操作参考）随部署镜像，
+        # 沙箱部署后十件齐全且与 dist 字节一致
+        self.assertEqual(len(DIST_FILES), 10)
+        self.assertIn("references/views.md", DIST_FILES)
+        target = self.make_target()
+        run_deploy(target)
+        skill = target / ".agents/skills/file-tree"
+        for rel in DIST_FILES:
+            self.assertTrue((skill / rel).is_file(), f"缺 {rel}")
+            self.assertEqual((skill / rel).read_bytes(), (DIST / rel).read_bytes(), rel)
+        views_doc = (skill / "references/views.md").read_text(encoding="utf-8")
+        self.assertIn("剪影", views_doc)  # 实文非占位
+
+    def test_deploy_upgrade_preserves_views_tree_json_bytes(self):
+        # 视图配置是业务数据：含 views 键的 tree.json 升级部署字节不动
+        #（PROTECTED 覆盖 tree.json，views 内嵌其中），视图块照常通过自检
+        target = self.make_target()
+        run_deploy(target)
+        skill = target / ".agents/skills/file-tree"
+        _ft, tool = self.make_side_tool(target)
+        tool.add("src", desc="源码目录", is_dir_entry=True)
+        doc = target / "docs" / "subtree.md"
+        doc.parent.mkdir(parents=True)
+        doc.write_text("# 子树\n\n正文\n", encoding="utf-8", newline="\n")
+        tool.view_add("ext", unders=["src"], doc="docs/subtree.md")
+        before = (skill / "tree.json").read_bytes()
+        self.assertIn("views", tool.load())  # 前置：确有视图配置
+
+        log = run_deploy(target)
+        joined = "".join(log)
+
+        self.assertIn("升级", joined)
+        self.assertNotIn("规范化迁移", joined)  # 视图数据不为"结构不规范"
+        self.assertEqual((skill / "tree.json").read_bytes(), before)  # 字节不动
+        errors, warnings = tool.check(strict=True)  # 视图块照常一致
+        self.assertEqual((errors, warnings), ([], []))
+
 
 class UpdateDistTest(unittest.TestCase):
     def test_update_dist_copies_from_source(self):
