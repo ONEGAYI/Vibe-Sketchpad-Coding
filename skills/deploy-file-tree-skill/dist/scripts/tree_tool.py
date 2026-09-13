@@ -383,24 +383,31 @@ def is_canonical_text(text: str) -> bool:
     return canonical_form(text) is not None
 
 
-def replace_block(text: str, begin: str, end: str, content: str) -> str:
-    """把 begin/end 标记行之间的内容整体替换为 content（标记行独占一行）。"""
-    lines = text.split("\n")
+def _find_block(lines: list[str], begin: str, end: str, ordered: bool = False) -> tuple[int, int]:
+    """定位 begin/end 标记行下标（整行精确匹配）；ordered 时校验顺序。
+
+    标记块的定位三段形状（缺失/顺序）全库共用；ordered=False 供只读提取
+    （如 block_content）沿用历史行为：不校验顺序，交调用方上下文兜底。
+    """
     try:
         b, e = lines.index(begin), lines.index(end)
     except ValueError as exc:
         raise ToolError(f"缺标记块 {begin} / {end}（文件被改坏？）") from exc
-    if e <= b:
+    if ordered and e <= b:
         raise ToolError(f"标记块顺序错误: {begin} 在 {end} 之后")
+    return b, e
+
+
+def replace_block(text: str, begin: str, end: str, content: str) -> str:
+    """把 begin/end 标记行之间的内容整体替换为 content（标记行独占一行）。"""
+    lines = text.split("\n")
+    b, e = _find_block(lines, begin, end, ordered=True)
     return "\n".join(lines[: b + 1] + content.split("\n") + lines[e:])
 
 
 def block_content(text: str, begin: str, end: str) -> str:
     lines = text.split("\n")
-    try:
-        b, e = lines.index(begin), lines.index(end)
-    except ValueError as exc:
-        raise ToolError(f"缺标记块 {begin} / {end}（文件被改坏？）") from exc
+    b, e = _find_block(lines, begin, end)
     return "\n".join(lines[b + 1 : e])
 
 
@@ -410,6 +417,11 @@ def view_tree_markers(view_id: str) -> tuple[str, str]:
         f"<!-- file-tree:tree^id={view_id}:begin 由脚本渲染，禁止手改 -->",
         f"<!-- file-tree:tree^id={view_id}:end -->",
     )
+
+
+def views_candidate(data: dict, views: dict, view_id: str, spec: dict) -> dict:
+    """构建"替换单个视图实体"的候选数据：其余视图逐实体浅拷贝保留，目标实体整体替换。"""
+    return {**data, "views": {k: dict(v) for k, v in views.items() if k != view_id} | {view_id: spec}}
 
 
 def fenced_block_lines(begin: str, end: str, content: str) -> list[str]:
@@ -454,12 +466,7 @@ def remove_view_block(text: str, begin: str, end: str) -> str:
     与下方保障空行相接会成双空行——去掉下方那个，删除动作自身不产生粘连。
     """
     lines = text.split("\n")
-    try:
-        b, e = lines.index(begin), lines.index(end)
-    except ValueError as exc:
-        raise ToolError(f"缺标记块 {begin} / {end}（文件被改坏？）") from exc
-    if e <= b:
-        raise ToolError(f"标记块顺序错误: {begin} 在 {end} 之后")
+    b, e = _find_block(lines, begin, end, ordered=True)
     start = b - 1 if b > 0 and lines[b - 1] == FENCE else b
     stop = e + 2 if e + 1 < len(lines) and lines[e + 1] == FENCE else e + 1
     if start > 0 and lines[start - 1] == "":
@@ -1519,6 +1526,19 @@ class TreeTool:
             updated += self._render_view(view_id, spec, data)
         return updated
 
+    def _commit_view_change(self, view_id: str, candidate: dict, undo_label: str, undo_docs: dict | None,
+                            target_line: int | None = None, target_doc: str | None = None) -> None:
+        """视图配置变更的落盘尾部三步：撤销快照 → 写数据 → 重读渲染。
+
+        重读落盘后的状态渲染（fresh），配置与渲染产物同源于磁盘；
+        target_line/target_doc 语义同 _render_view（均为 None = 全部
+        绑定文档原地刷新）。view-add / view-doc 三条写路径共用此管线。
+        """
+        self._record_undo(undo_label, docs=undo_docs)
+        self.write_data(candidate)
+        fresh = self.load()
+        self._render_view(view_id, fresh["views"][view_id], fresh, target_line=target_line, target_doc=target_doc)
+
     def view_add(self, view_id: str, unders=None, tags=None, excludes=None, filt=None, doc=None, line=None,
                  overrides=None, collapse=None, expand=None, hide=None, show=None) -> None:
         """登记/更新视图：过滤器表达式树 + 渲染覆盖 + 绑定文档。
@@ -1565,31 +1585,24 @@ class TreeTool:
             docs_list = [doc_rel]
         if not eval_filter(expr, data["tree"]):
             print(f"警告: 视图 {view_id} 过滤器选中 0 条（空视图：渲染仅剩根名行）")
-        candidate = dict(data)
-        views = {k: dict(v) for k, v in data.get("views", {}).items()}
-        views[view_id] = {"filter": expr}
+        spec = {"filter": expr}
         if docs_list:
-            views[view_id]["docs"] = docs_list
+            spec["docs"] = docs_list
         if ov:
-            views[view_id]["render_overrides"] = ov
-        candidate["views"] = views
+            spec["render_overrides"] = ov
+        candidate = views_candidate(data, data.get("views", {}), view_id, spec)
         normalize_data(candidate)  # 写前预检（结构非法的手改数据在此拦截，拒绝不留半截历史）
         if docs_list:  # 渲染计划 dry-run：行号越界/孤立标记/同 id 多块等在落盘前暴露，拒绝保持原子
-            content = self._view_renderable(view_id, views[view_id], data)
+            content = self._view_renderable(view_id, spec, data)
             if content is not None:
                 begin, end = view_tree_markers(view_id)
                 for doc_rel in docs_list:
                     text = self._read_doc(doc_rel)
                     if text is not None:
                         self._plan_view_block(text, begin, end, content, line, doc_rel)
-        self._record_undo(
-            f"view-add {view_id}",
-            docs={doc_rel: self._read_doc(doc_rel)} if docs_list else None,
-        )
-        self.write_data(candidate)
-        fresh = self.load()
-        self._render_view(
-            view_id, fresh["views"][view_id], fresh,
+        self._commit_view_change(
+            view_id, candidate, f"view-add {view_id}",
+            {doc_rel: self._read_doc(doc_rel)} if docs_list else None,
             target_line=line, target_doc=docs_list[0] if docs_list else None,
         )
 
@@ -1622,7 +1635,7 @@ class TreeTool:
                 raise ToolError(f"绑定文档不存在（先创建文档再绑定视图）: {doc_rel}")
             new_spec = dict(spec)
             new_spec["docs"] = sorted(spec.get("docs", []) + [doc_rel], key=sort_key)
-            candidate = {**data, "views": {k: dict(v) for k, v in views.items()} | {view_id: new_spec}}
+            candidate = views_candidate(data, views, view_id, new_spec)
             normalize_data(candidate)  # 写前预检（保持原子）
             # 渲染计划 dry-run 覆盖扩充后的全清单（不止新文档）：既有文档的
             # 病态多块/孤立标记同样在落盘前暴露；--line 仅校验新文档
@@ -1633,14 +1646,9 @@ class TreeTool:
                     text = self._read_doc(other_rel)
                     if text is not None:
                         self._plan_view_block(text, begin, end, made, line if other_rel == doc_rel else None, other_rel)
-            self._record_undo(
-                f"view-doc --add {view_id} {doc_rel}",
-                docs={doc_rel: self._read_doc(doc_rel)},
-            )
-            self.write_data(candidate)
-            fresh = self.load()
-            self._render_view(
-                view_id, fresh["views"][view_id], fresh,
+            self._commit_view_change(
+                view_id, candidate, f"view-doc --add {view_id} {doc_rel}",
+                {doc_rel: self._read_doc(doc_rel)},
                 target_line=line, target_doc=doc_rel,
             )
         else:
@@ -1658,14 +1666,11 @@ class TreeTool:
             new_spec = {k: v for k, v in spec.items() if k != "docs"}
             if remaining:
                 new_spec["docs"] = remaining  # 空 docs 省略键：视图退化为配置先行
-            candidate = {**data, "views": {k: dict(v) for k, v in views.items()} | {view_id: new_spec}}
+            candidate = views_candidate(data, views, view_id, new_spec)
             normalize_data(candidate)
-            self._record_undo(f"view-doc --rm {view_id} {doc_rel}")  # 不动任何文档，无需 docs 快照
-            self.write_data(candidate)
             # --rm 也是数据变更：剩余绑定文档照常刷新保持镜像一致
-            # （解绑文档不在清单中，其保留的块不再被触碰）
-            fresh = self.load()
-            self._render_view(view_id, fresh["views"][view_id], fresh)
+            # （解绑文档不在清单中，其保留的块不再被触碰；不动解绑文档无需 docs 快照）
+            self._commit_view_change(view_id, candidate, f"view-doc --rm {view_id} {doc_rel}", None)
 
     def view_rm(self, view_id: str, purge: bool = False) -> int:
         """删除视图实体：默认仅从 views 配置删除（各绑定文档的块原样保留为
@@ -2076,17 +2081,12 @@ def _cmd_mv(tool: TreeTool, args) -> None:
 
 
 def _cmd_mv_batch(tool: TreeTool, args) -> None:
-    manifest = Path(args.manifest)
-    try:
-        raw = manifest.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ToolError(f"清单文件不可读: {manifest}（{exc}）")
-    try:
-        obj = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ToolError(f"清单 JSON 解析失败: {exc}")
-    if not isinstance(obj, dict) or not isinstance(obj.get("moves"), list):
-        raise ToolError('清单顶层须为对象且含 "moves" 数组，如 {"moves": [{"src": "a.ts", "dst": "b/a.ts"}]}')
+    obj = _load_manifest(
+        args.manifest,
+        "moves",
+        '清单顶层须为对象且含 "moves" 数组，如 {"moves": [{"src": "a.ts", "dst": "b/a.ts"}]}',
+        value_is_list=True,
+    )
     n, edges = tool.mv_batch(obj["moves"])
     tool.render()
     parts = [f"重写 {edges} 条 rel 边", "一次变更，单步历史"] if edges else ["一次变更，单步历史"]
@@ -2094,17 +2094,12 @@ def _cmd_mv_batch(tool: TreeTool, args) -> None:
 
 
 def _cmd_add_batch(tool: TreeTool, args) -> None:
-    manifest = Path(args.manifest)
-    try:
-        raw = manifest.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ToolError(f"清单文件不可读: {manifest}（{exc}）")
-    try:
-        obj = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ToolError(f"清单 JSON 解析失败: {exc}")
-    if not isinstance(obj, dict) or not isinstance(obj.get("entries"), list):
-        raise ToolError('清单顶层须为对象且含 "entries" 数组，如 {"entries": [{"path": "a.ts", "desc": "简介"}]}')
+    obj = _load_manifest(
+        args.manifest,
+        "entries",
+        '清单顶层须为对象且含 "entries" 数组，如 {"entries": [{"path": "a.ts", "desc": "简介"}]}',
+        value_is_list=True,
+    )
     n = tool.add_batch(obj["entries"])
     tool.render()
     print(f"已批量写入并重渲染: {n} 条（一次变更，单步历史）")
@@ -2222,8 +2217,11 @@ def _cmd_tag_rm(tool: TreeTool, args) -> None:
     print(f"已删除标签并重渲染: {args.name}")
 
 
-def _load_filter_manifest(manifest_str: str):
-    """读取 --filter 清单：顶层对象含 filter 键（表达式树原样交由 view-add 校验归一）。"""
+def _load_manifest(manifest_str: str, key: str, shape_msg: str, value_is_list: bool = False) -> dict:
+    """读取 JSON 清单并校验顶层形态：对象且含 key 键（value_is_list 时键值还须为数组）。
+
+    读文件 / JSON 解析 / 顶层形态三段错误消息全库统一；键值的语义校验归各命令。
+    """
     manifest = Path(manifest_str)
     try:
         raw = manifest.read_text(encoding="utf-8")
@@ -2233,28 +2231,27 @@ def _load_filter_manifest(manifest_str: str):
         obj = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise ToolError(f"清单 JSON 解析失败: {exc}") from exc
-    if not isinstance(obj, dict) or "filter" not in obj:
-        raise ToolError('清单顶层须为对象且含 "filter" 键，如 {"filter": {"op": "under", "path": "apps"}}')
-    return obj["filter"]
+    if not isinstance(obj, dict) or key not in obj or (value_is_list and not isinstance(obj[key], list)):
+        raise ToolError(shape_msg)
+    return obj
+
+
+def _load_filter_manifest(manifest_str: str):
+    """读取 --filter 清单：顶层对象含 filter 键（表达式树原样交由 view-add 校验归一）。"""
+    return _load_manifest(
+        manifest_str,
+        "filter",
+        '清单顶层须为对象且含 "filter" 键，如 {"filter": {"op": "under", "path": "apps"}}',
+    )["filter"]
 
 
 def _load_overrides_manifest(manifest_str: str):
     """读取 --overrides 清单：顶层对象含 overrides 键（覆盖表原样交由 view-add 校验归一）。"""
-    manifest = Path(manifest_str)
-    try:
-        raw = manifest.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ToolError(f"清单文件不可读: {manifest}（{exc}）") from exc
-    try:
-        obj = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ToolError(f"清单 JSON 解析失败: {exc}") from exc
-    if not isinstance(obj, dict) or "overrides" not in obj:
-        raise ToolError(
-            '清单顶层须为对象且含 "overrides" 键，'
-            '如 {"overrides": {"apps/ui": {"collapsed": true}}}'
-        )
-    return obj["overrides"]
+    return _load_manifest(
+        manifest_str,
+        "overrides",
+        '清单顶层须为对象且含 "overrides" 键，如 {"overrides": {"apps/ui": {"collapsed": true}}}',
+    )["overrides"]
 
 
 def _cmd_view_add(tool: TreeTool, args) -> None:
