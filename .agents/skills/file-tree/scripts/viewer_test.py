@@ -234,6 +234,25 @@ class SnapshotLoadTest(unittest.TestCase):
         # 快照独立性：加载不产生任何伴生文件（历史、AGENTS.md 等）
         self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["tree.json"])
 
+    def test_load_snapshot_with_views_key(self):
+        # 含 views 键的快照（多视图能力，#33 user story 23）正常加载：
+        # viewer_core 只读 root/tags/tree 三键，views 透传无害，浏览与统计不受影响
+        baseline_data = make_snapshot_data()
+        baseline = Snapshot(self.write_snapshot(compact_dumps(baseline_data)))
+        with_views = make_snapshot_data()
+        with_views["views"] = {
+            "ext": {
+                "filter": {"op": "under", "path": "apps"},
+                "docs": ["extensions/README.md"],
+            },
+        }
+        snap = Snapshot(self.write_snapshot(compact_dumps(with_views)))
+        self.assertEqual(snap.root_name, baseline.root_name)
+        self.assertEqual(snap.tags, baseline.tags)
+        self.assertEqual(snap.counts, baseline.counts)  # views 不进树，统计口径不变
+        self.assertEqual(snap.children(""), baseline.children(""))
+        self.assertEqual(snap.detail("apps/main.tsx"), baseline.detail("apps/main.tsx"))
+
 
 # ---------------------------------------------------------------------------
 # 内存查询：children / detail 语义（G06/G07/G11/G14）
