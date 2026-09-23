@@ -1,6 +1,6 @@
 ---
 name: file-tree
-description: 查询、维护和校验已部署 file-tree 的仓库文件树；也用于处理其 tree.json 的 Git 冲突，或只读浏览文件树快照。不用于维护 README 等其他手写文件树。
+description: 在已部署 file-tree 的仓库中，同步新增、删除或移动的文件与目录，更新或查询文件职责及 rel/tags，提交前校验文件树，合并 tree.json 的 Git 冲突，或只读浏览快照时使用。不用于维护 README 等其他手写文件树。
 ---
 
 # 文件树维护与查询
