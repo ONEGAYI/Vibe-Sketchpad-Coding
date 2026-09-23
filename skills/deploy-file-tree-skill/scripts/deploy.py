@@ -1,7 +1,7 @@
 """deploy-file-tree-skill：把 file-tree 技能部署到任意仓库。
 
-dist/ 是 file-tree 技能的发行版快照——公用核心五件套
-（SKILL.md / references/views.md / agents/openai.yaml /
+dist/ 是 file-tree 技能的发行版快照——公用核心七件套
+（SKILL.md / references/merge.md / references/views.md / references/viewer.md / agents/openai.yaml /
 scripts/tree_tool.py / scripts/tree_tool_test.py）、
 GUI 查看器五件（viewer.py / viewer_core.py / viewer_test.py /
 gen_viewer_sample.py / bench_viewer.py）与受控发行静态资源 dist/viewer/
@@ -45,7 +45,9 @@ DIST = SKILL_ROOT / "dist"
 BUILD_GUIDE = "cd frontend && npm install && npm run build"
 DIST_FILES = (
     "SKILL.md",
+    "references/merge.md",
     "references/views.md",
+    "references/viewer.md",
     "agents/openai.yaml",
     "scripts/tree_tool.py",
     "scripts/tree_tool_test.py",
@@ -191,7 +193,7 @@ def update_dist(
     source_rel: str = ".agents/skills/file-tree",
     dist_root: Path | None = None,
 ) -> list[str]:
-    """从源仓库提取固定清单（十件）刷新 dist 快照（不动 dist 里其他内容）。"""
+    """从源仓库提取固定清单（十二件）刷新 dist 快照（不动 dist 里其他内容）。"""
     source_root = Path(source_root).resolve()
     dist_root = DIST if dist_root is None else Path(dist_root)
     src_skill = source_root / source_rel
@@ -219,7 +221,7 @@ def main(argv=None) -> int:
     p.add_argument("target", help="目标仓库路径")
     p.add_argument("--skill-dir", default=".agents/skills/file-tree", help="目标技能相对路径")
 
-    p = sub.add_parser("update-dist", help="从源仓库提取固定清单（十件）刷新 dist 快照")
+    p = sub.add_parser("update-dist", help="从源仓库提取固定清单（十二件）刷新 dist 快照")
     p.add_argument("source", help="源仓库路径（file-tree 开发主线）")
     p.add_argument("--source-dir", default=".agents/skills/file-tree", help="源技能相对路径")
 
