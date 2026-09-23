@@ -34,6 +34,7 @@ mv <src> <dst>                   # 条目带信息迁移（含子树）：字段
 
 # 批量迁移（JSON 清单）：一份清单 = 一次数据变更 = 一步撤销历史；批内 src/dst 互斥预校验，任一条非法整批拒绝
 mv-batch <manifest.json>         # {"moves": [{"src": "a.ts", "dst": "b/a.ts"}, ...]}
+merge [--decisions <文件.json>]    # Git 冲突两阶段处理：自动三方合并；有歧义时输出 Agent 冲突清单并待决定
 mark <dir> [--tags a,b] [--tags-mode add|replace] [--git-ignore|--no-git-ignore] [--depth N]
                                   # 子树批量标记（见下）：tags 追加/覆写 + git-ignore 传播，可限深度
 get <path> [path...]             # 查看条目全部字段（可多路径批量，条间空行分隔）
@@ -76,6 +77,10 @@ root [<名字>|--clear]            # 查看/固定/清除渲染根名；未固�
 
 **批量命令（add-batch / rm-batch / mv-batch）**：一份清单 = 一次数据变更 = 一步撤销历史，批量操作不再逐条挤兑撤销栈（默认各留 20 步）。**整批原子生效**：任一条非法（未知标签、路径冲突、字段类型错误、条目不存在等）整批拒绝，tree.json 与 AGENTS.md 保持原状。add-batch 清单条目字段与单条 `add` 完全同语义（全可选、upsert 保留未给字段），但含未知字段或批内重复路径直接拒绝；`rel` 在整批应用后的最终树上统一校验，**批内条目互引合法**。`rm-batch` 额外预校验批内不得互为祖先-后代（删祖先已覆盖后代），逐条删除保留"修剪变空父目录"语义。`mv-batch` 清单为 `moves` 数组（每条恰含 `src`/`dst` 两个非空字符串）；批内互斥预校验——src 间、dst 间均不得重复或互为祖先-后代，且任一源与目的地不得落在其他移动的源或目的地路径上（双向互斥，**不支持批内移动链**，各条校验语义以初始树为准）；清单按序应用，结果与逐条同序执行一致；单条级违规由应用期校验拦截、消息自带具体路径。
 
+**Git 冲突合并（merge）**：直接在本仓库发生 `tree.json` 三方冲突后运行。脚本每次从 Git index 的 stage 1/2/3 读取共同祖先、本分支、对方分支；不会解析带冲突标记的工作树文件，也不依赖后台进程或跨命令内存。首次 `merge` 先按条目和字段自动合并；跨分支组合导致 `rel`、标签或视图引用失效，也转为待决冲突。若全部可确定，写回规范紧凑 JSON；若有歧义，stdout 输出 `schema_version: 1` 的 JSON 清单（`merge_id`、`status: needs_decisions`、`conflicts`、`unresolved`），此时**不写 tree.json**。冲突项含按内容指纹生成的 `id`、`reason`、`scope`、`path`、`field`、三个版本的 `{present,value}` 及允许的 `actions`；`present` 用于区分字段缺失与 JSON null。若先处理一个冲突后显露新的引用冲突，错误对象的 `missing_conflicts` 会给出新冲突的完整三方内容，可据此追加决定；旧 id 不会指向另一个冲突。
+
+Agent 将所有决定写成 UTF-8 JSON，再运行 `merge --decisions <文件>`：`{"merge_id":"首次输出值","decisions":[{"id":"清单中的冲突id","action":"set","value":"最终描述"}]}`。动作有 `base`、`ours`、`theirs`、`set`，涉及缺失值或引用失效的冲突还可 `delete`。第二次调用重新读取 Git 三阶段并重算自动部分，核对 `merge_id` 与每个冲突 id；遗漏、未知、重复 id，过期 `merge_id`，非法动作、缺值或决定导致无效结果时，stdout 返回 `status: invalid_decisions`、机器可读 `error.code` 与定位/修正提示，退出码 2，**不写 tree.json**。部分决定须连同先前决定累计提交，不在本机保存会话状态。完整通过后才写 tree.json；命令不自动 `git add` 或改写 Git index。随后先处理 AGENTS.md 等文档自身的合并冲突，再运行 `render`、`check --strict` 并暂存已解决文件。`merge` 属 Git 冲突恢复入口，不使用普通写命令的 undo 历史。
+
 **子树批量标记（mark）**：以树中已展开 children 的目录条目为锚点，把 tags 与 git-ignore 一次性传播到子树（锚点自身与子树外不动），一次变更 = 一步撤销历史。分工：**tags 作用于子树全部条目（含目录）**——tags 无继承语义，目录条目也是 `query --tag` 的对象；**git-ignore 仅落文件条目且只给"未表态"者表态**——已有显式设置（true/false）的条目是个体意图不覆写，true 方向还自动跳过 git 已跟踪文件（落 true 即矛盾标记，check 必报），false 方向不跳 tracked（落显式 false 恰是退出祖先豁免的修复动作）；目录不落标记，否则就近覆写继承会穿透 depth 限制。tags 两种模式：`add` 并集追加（默认）、`replace` 整体替换（`--tags ""` 即清空）；`--no-git-ignore` 落盘显式 false，可批量退出子树豁免。`--depth N` 限定相对锚点层数（1 = 直接子级），缺省全深度。输出 tags / git-ignore 受影响条数与跳过条数。
 
 **撤销历史（防误操作）**：每次数据变更前自动快照当前 tree.json 全量；undo 恢复后自动重渲染 AGENTS.md，新操作会截断 redo 分支（编辑器语义）。历史存放于 **git 私有区 `<gitdir>/file-tree/history.json`**——天然不被 git 追踪、不入库、clone 不携带；判定以 `<gitdir>/HEAD` 存在为准（空 `.git` 目录不算仓库），且脚本绝不创建 `.git`；非 git 环境退化为技能目录本地文件 `.history.json`。**仓库初始化晚于技能使用时自动收敛**：加载按 git 私有区 → 旧位置顺序找历史（撤销栈不断裂），保存永远写 git 私有区并删除旧位置文件；check 对待收敛状态给出告警。历史基线是「上一次脚本操作前」，中途手改 tree.json 的内容会随回滚丢失（手改本就被禁止）。
@@ -117,22 +122,10 @@ root [<名字>|--clear]            # 查看/固定/清除渲染根名；未固�
 
 ## 只读查看器（GUI）
 
-浏览快照不必读 JSON 原文：技能自带只读网页查看器，**运行只需 Python 3.8+ 与现代浏览器，无需 Node**（页面发行资源随技能部署在技能目录 `viewer/`）：
+需要浏览或搜索 `tree.json` 快照时，运行技能自带的只读网页查看器。快照可在仓库外；运行需要 Python 3.8+ 与现代浏览器，无需 Node：
 
 ```bash
 python .agents/skills/file-tree/scripts/viewer.py <tree.json 路径> [--port N] [--host H]
 ```
 
-- 启动门槛 **Python 3.8+**：低于即拒绝启动并打印当前/所需版本（不后台升级运行时）；快照不存在/路径是目录给可理解错误退出；静态资源缺失打印构建方法并降级（页面 503、API 可用）。门槛是必要条件；已有 Python 3.14.0 与 Windows Python 3.13.9 实测，其他版本不能仅凭门槛宣称已验证
-- 真浏览器证据包括 2026-09-11 ZCode IAB 原版 GUI（母体技能证据矩阵 V6–V9）和 2026-09-12 Windows / Edge 152 新版阅读与层级 GUI；新版发行报告位于母体 `docs/gui-redesign-verification.md`
-- 启动后打印访问地址（默认 `http://127.0.0.1:8618/`），按 Ctrl+C 停止；默认只监听本机，远端访问请自行建立 SSH 隧道：`ssh -L 8618:127.0.0.1:8618 user@server`，工作站浏览器访问 `http://127.0.0.1:8618/`
-- 快照可位于仓库之外（如从旧机 SCP 拉来的 JSON），无需源码、`.git` 或 AGENTS.md；**复制 JSON 本身不需要 Python**——只有旧机运行核心工具（add/check/query…）和现代机运行查看器才需要 Python
-- 绝对只读：浏览、搜索、刷新不写数据、不触发格式转换、不生成撤销历史
-- **替换 tree.json 后在页面点刷新即可**（重读同一路径），不必重新构建或重启
-- 普通侧栏默认310px，可拖动或用分隔条左右键每次调整10px；范围240px至 `min(440px, 0.46W)`，W为正文扣除9px分隔条后的可用宽。缩窗只钳制显示，放大恢复原宽
-- 只有 **层级浏览** 抽屉按钮将侧栏展开到80%，显示按需加载的目录列；分隔条在此模式停用。**收起层级** 或 **收起并阅读全文** 恢复普通宽度与当前选择。W≤600px时上下排列，按钮仍可切换视图
-- 根面包屑进入根概览与路径历史，根不复制；文件复制快照相对路径。布局切换保留搜索草稿和结果页，命中定位后 **返回搜索** 恢复原页；刷新按原条件重新查询第一页
-- 帮助面板列出树、层级列、分隔条及历史快捷键。布局偏好只存本次会话，不写JSON、不产生撤销历史；原始标志默认折叠，三态信息仍可展开查看
-- 大样本生成与服务端性能基准（仅构建/实测场景）：`scripts/gen_viewer_sample.py` / `scripts/bench_viewer.py`；查看器契约测试 `python .agents/skills/file-tree/scripts/viewer_test.py`
-
-CentOS 7 等旧环境运行核心工具的解释器候选与跨环境验证矩阵（V1–V5）见母体技能（deploy-file-tree-skill）SKILL.md"跨环境浏览与 Python 边界"节；系统 Python 3.6.8/2.7.5 实测无法运行核心工具，独立解释器方案待旧环境实测。
+查看器仅浏览数据，不写 `tree.json`、不转换格式、不生成撤销历史。需要刷新、远端访问、界面操作、启动排错或兼容性细节时，再读 [查看器使用参考](references/viewer.md)。
