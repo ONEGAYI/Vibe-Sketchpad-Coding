@@ -364,11 +364,12 @@ class DeployTest(unittest.TestCase):
 
     # ---------- 视图参考文档与视图数据随部署（#33 spec / #40） ----------
 
-    def test_deploy_ships_references_for_views_and_viewer(self):
-        # 两份按需阅读的参考文档都属于发行快照；部署后可独立使用。
-        self.assertEqual(len(DIST_FILES), 11)
+    def test_deploy_ships_task_references(self):
+        # 按需阅读的参考文档属于发行快照；部署后可独立使用。
+        self.assertEqual(len(DIST_FILES), 12)
         self.assertIn("references/views.md", DIST_FILES)
         self.assertIn("references/viewer.md", DIST_FILES)
+        self.assertIn("references/merge.md", DIST_FILES)
         target = self.make_target()
         run_deploy(target)
         skill = target / ".agents/skills/file-tree"
@@ -380,6 +381,9 @@ class DeployTest(unittest.TestCase):
         viewer_doc = (skill / "references/viewer.md").read_text(encoding="utf-8")
         self.assertIn("只读", viewer_doc)
         self.assertIn("刷新", viewer_doc)
+        merge_doc = (skill / "references/merge.md").read_text(encoding="utf-8")
+        self.assertIn("merge_id", merge_doc)
+        self.assertIn("decisions", merge_doc)
 
     def test_deploy_upgrade_preserves_views_tree_json_bytes(self):
         # 视图配置是业务数据：含 views 键的 tree.json 升级部署字节不动

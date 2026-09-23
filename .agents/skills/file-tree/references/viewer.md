@@ -20,9 +20,7 @@ python .agents/skills/file-tree/scripts/viewer.py <tree.json 路径> [--port N] 
 - 根面包屑可进入根概览和路径历史；复制文件时得到快照相对路径。布局切换保留搜索草稿及结果页，命中定位后可用**返回搜索**恢复原页；刷新按原条件重新查询第一页。
 - 帮助面板列出树、层级列、分隔条和历史快捷键。布局偏好只存当前会话；原始标志默认折叠，三态信息仍可展开查看。
 
-## 启动边界与验证
+## 排错与验证
 
 - Python 低于 3.8 时拒绝启动并打印当前及所需版本；快照不存在或路径是目录时给出错误。静态资源缺失时打印构建方法，页面返回 503，但 API 仍可用。3.8 是启动门槛，不等于该版本已经实测；已实测 Python 3.14.0 与 Windows Python 3.13.9。
-- 真浏览器证据包括 2026-09-11 ZCode IAB 原版 GUI（母体技能证据矩阵 V6–V9）和 2026-09-12 Windows / Edge 152 新版阅读与层级 GUI；新版发行报告位于母体 `docs/gui-redesign-verification.md`。
 - 查看器契约测试：`python .agents/skills/file-tree/scripts/viewer_test.py`。大样本生成与服务端性能基准仅用于构建或实测：`scripts/gen_viewer_sample.py`、`scripts/bench_viewer.py`。
-- CentOS 7 等旧环境运行**核心工具**的解释器候选与验证矩阵见母体技能 `deploy-file-tree-skill/SKILL.md` 的“跨环境浏览与 Python 边界”；系统 Python 3.6.8/2.7.5 实测无法运行核心工具，独立解释器方案仍待旧环境验证。
