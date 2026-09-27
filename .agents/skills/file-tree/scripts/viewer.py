@@ -1,7 +1,7 @@
 """独立快照的只读文件树查看器：标准库 HTTP 服务 + 前端静态资源托管。
 
 用法:
-    python viewer.py <tree.json 路径> [--port N] [--host H]
+    python viewer.py <tree.json 路径> [--compare <第二份tree.json>] [--port N] [--host H]
 
 - 默认绑定 127.0.0.1（G20）：只提供查看器页面资源与快照查询，
   不把任意源码目录作为静态目录暴露；远端访问请自行建立 SSH 隧道。
@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from viewer_core import DEFAULT_PAGE_SIZE, Snapshot, ViewerError  # noqa: E402
+from viewer_core import Comparison, DEFAULT_PAGE_SIZE, Snapshot, ViewerError  # noqa: E402
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 # 受控发行静态资源（G18）：随技能入库与部署——母体位于 dist/viewer/，
@@ -90,6 +90,8 @@ class ViewerServer(ThreadingHTTPServer):
         static_dir: Path,
         quiet: bool = False,
         host_check: bool = False,
+        compare_json: Path | None = None,
+        comparison: Comparison | None = None,
     ):
         super().__init__(address, handler)
         self.tree_json = tree_json  # 刷新始终重读这一路径（G12：同一路径替换）
@@ -100,6 +102,8 @@ class ViewerServer(ThreadingHTTPServer):
         # 网络暴露，跳过校验（文档另有 SSH 隧道方案）
         self.host_check = host_check
         self._snapshot = snapshot
+        self.compare_json = compare_json
+        self._comparison = comparison
         self._generation = 1
         self._lock = threading.Lock()
 
@@ -118,6 +122,12 @@ class ViewerServer(ThreadingHTTPServer):
         with self._lock:
             return self._snapshot, self._generation
 
+    def current_comparison(self) -> tuple[Comparison, int]:
+        with self._lock:
+            if self._comparison is None:
+                raise ViewerError("未指定第二份快照；启动时使用 --compare <tree.json>", 400)
+            return self._comparison, self._generation
+
     def refresh_snapshot(self) -> tuple[Snapshot, int]:
         """重读同一路径快照；成功才原子替换并递增世代号，失败原样保留。
 
@@ -125,8 +135,12 @@ class ViewerServer(ThreadingHTTPServer):
       不被阻塞；并发刷新时后完成者胜，世代号仍严格递增无混用。
         """
         fresh = Snapshot(self.tree_json)  # 失败抛 ViewerError，旧快照不受影响
+        new_comparison = None
+        if self.compare_json is not None:
+            new_comparison = Comparison(fresh, Snapshot(self.compare_json))
         with self._lock:
             self._snapshot = fresh
+            self._comparison = new_comparison
             self._generation += 1
             return fresh, self._generation
 
@@ -145,15 +159,24 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return
         parsed = urlsplit(self.path)
         try:
-            if parsed.path == "/api/root":
+            if parsed.path == "/" and self.server.compare_json is not None and \
+                    parse_qs(parsed.query).get("compare") != ["1"]:
+                self.send_response(302)
+                self.send_header("Location", "/?compare=1")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            elif parsed.path == "/api/root":
                 snap, gen = self.server.current()
-                self._send_json(200, {"generation": gen, **snap.root_info()})
+                extra = {"compare_source": str(self.server.compare_json)} if self.server.compare_json else {}
+                self._send_json(200, {"generation": gen, **snap.root_info(), **extra})
             elif parsed.path == "/api/children":
                 self._api_children(parse_qs(parsed.query))
             elif parsed.path == "/api/detail":
                 self._api_detail(parse_qs(parsed.query))
             elif parsed.path == "/api/search":
                 self._api_search(parse_qs(parsed.query))
+            elif parsed.path == "/api/diff":
+                self._api_diff(parse_qs(parsed.query))
             elif parsed.path.startswith("/api/"):
                 self._send_json(404, {"error": f"未知接口: {parsed.path}"})
             else:
@@ -231,7 +254,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 {"error": str(exc), "generation": old_gen, "refreshed": False},
             )
             return
-        self._send_json(200, {"generation": gen, "refreshed": True, **snap.root_info()})
+        extra = {"compare_source": str(self.server.compare_json)} if self.server.compare_json else {}
+        self._send_json(200, {"generation": gen, "refreshed": True, **snap.root_info(), **extra})
 
     def _api_children(self, query: dict):
         snap, gen = self.server.current()
@@ -281,6 +305,23 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 ),
             },
         )
+
+    def _api_diff(self, query: dict):
+        comparison, gen = self.server.current_comparison()
+
+        def integer(name: str, default: int) -> int:
+            raw = (query.get(name) or [str(default)])[0]
+            try:
+                return int(raw)
+            except ValueError:
+                raise ViewerError(f"{name} 必须是整数: {raw!r}", 400) from None
+
+        statuses = query.get("status", [])
+        scopes = query.get("scope", [])
+        under = (query.get("under") or [None])[0]
+        payload = comparison.page(statuses, scopes, under,
+                                  integer("page", 1), integer("page_size", DEFAULT_PAGE_SIZE))
+        self._send_json(200, {"generation": gen, **payload})
 
     # ------------------------------------------------------------------
     # 静态资源：仅托管查看器前端构建目录（G20），拒绝目录穿越
@@ -376,6 +417,7 @@ def create_server(
     port: int = 0,
     static_dir: Path | str | None = None,
     quiet: bool = False,
+    compare_json: Path | str | None = None,
 ) -> ViewerServer:
     """构造并绑定服务（不启动事件循环）；快照非法抛 ViewerError。
 
@@ -383,6 +425,8 @@ def create_server(
     """
     snapshot_path = Path(tree_json)
     snapshot = Snapshot(snapshot_path)  # 加载失败（ViewerError）直接上抛，不启动服务
+    compare_path = Path(compare_json) if compare_json is not None else None
+    comparison = Comparison(snapshot, Snapshot(compare_path)) if compare_path is not None else None
     static = Path(static_dir if static_dir is not None else DEFAULT_STATIC_DIR)
     return ViewerServer(
         (host, port),
@@ -392,6 +436,8 @@ def create_server(
         static,
         quiet,
         host_check=host == DEFAULT_HOST,
+        compare_json=compare_path,
+        comparison=comparison,
     )
 
 
@@ -401,6 +447,7 @@ def main(argv: list[str] | None = None) -> int:
         description="独立快照的只读文件树查看器（Python 标准库实现，默认绑定 127.0.0.1）",
     )
     parser.add_argument("tree_json", help="tree.json 快照路径（可位于仓库之外）")
+    parser.add_argument("--compare", help="第二份 tree.json 快照路径；启用只读 diff")
     parser.add_argument("--host", default=DEFAULT_HOST, help=f"监听地址（默认 {DEFAULT_HOST}）")
     parser.add_argument(
         "--port", type=int, default=DEFAULT_PORT, help=f"监听端口（默认 {DEFAULT_PORT}，0 表示随机）"
@@ -429,8 +476,11 @@ def main(argv: list[str] | None = None) -> int:
     if not snapshot_path.is_file():
         print(f"无法启动查看器：快照路径不是文件: {snapshot_path}", file=sys.stderr)
         return 2
+    if args.compare is not None and not Path(args.compare).is_file():
+        print(f"无法启动查看器：第二份快照不是文件: {args.compare}", file=sys.stderr)
+        return 2
     try:
-        server = create_server(snapshot_path, host=args.host, port=args.port)
+        server = create_server(snapshot_path, host=args.host, port=args.port, compare_json=args.compare)
     except ViewerError as exc:
         print(f"无法启动查看器：{exc}", file=sys.stderr)
         return 2
@@ -439,10 +489,13 @@ def main(argv: list[str] | None = None) -> int:
     counts = server.snapshot.counts
     print("文件树只读查看器")
     print(f"快照: {snapshot_path}（{counts['total']} 条目：{counts['dirs']} 目录 / {counts['files']} 文件）")
+    if args.compare is not None:
+        print(f"比较: {args.compare}")
     if not (server.static_dir / "index.html").is_file():
         print(f"提示: 发行页面资源缺失（缺 {server.static_dir / 'index.html'}），页面暂不可用，API 仍可访问")
         print(f"      组装方法（需现代构建机的 Node）: {BUILD_GUIDE}")
-    print(f"访问地址: http://{host}:{port}/")
+    suffix = "/?compare=1" if args.compare is not None else "/"
+    print(f"访问地址: http://{host}:{port}{suffix}")
     print("按 Ctrl+C 停止")
     sys.stdout.flush()
     try:

@@ -20,21 +20,22 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from tree_tool import (  # noqa: E402
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
     ToolError,
+    diff_page,
+    diff_tree_data,
     effective_git_ignore,
     find_node,
     is_dir,
     normalize_data,
+    snapshot_pair_id,
     sort_key,
     split_rel_path,
     walk_entries,
 )
 
 DEFAULT_ROOT_NAME = "tree"  # 快照无 root 键时的展示根名（viewer 无仓库上下文）
-DEFAULT_PAGE_SIZE = 50  # 搜索分页默认每页条数
-MAX_PAGE_SIZE = 200  # 搜索分页每页上限（防止一页拉全量，G14 按需）
-
-
 def _is_positive_int(value) -> bool:
     """严格正整数判定（bool 是 int 子类，显式排除）。"""
     return isinstance(value, int) and not isinstance(value, bool) and value >= 1
@@ -63,7 +64,8 @@ class Snapshot:
     def __init__(self, tree_json: Path):
         tree_json = Path(tree_json)
         try:
-            text = tree_json.read_bytes().decode("utf-8")
+            raw = tree_json.read_bytes()
+            text = raw.decode("utf-8")
         except OSError as exc:
             raise ViewerError(f"无法读取快照文件: {tree_json}（{exc}）", 500) from exc
         except UnicodeDecodeError as exc:
@@ -82,6 +84,8 @@ class Snapshot:
             raise ViewerError("快照嵌套层级过深，无法解析（RecursionError）", 400) from exc
 
         self.source = str(tree_json)
+        self.raw_bytes = raw
+        self.data = normalized
         self.root_name: str = normalized.get("root") or DEFAULT_ROOT_NAME
         self.tags: dict[str, str] = dict(normalized.get("tags", {}))
         self.tree: dict = normalized["tree"]
@@ -305,3 +309,26 @@ class Snapshot:
         路径拆段与就近覆写逻辑。
         """
         return effective_git_ignore(self.tree, "/".join(parts))
+
+
+class Comparison:
+    """两份只读快照的内存比较结果；分页请求不重新扫描整棵树。"""
+
+    def __init__(self, old: Snapshot, new: Snapshot):
+        self.old = old
+        self.new = new
+        self.changes = diff_tree_data(old.data, new.data)
+        self.comparison_id = snapshot_pair_id(Path(old.source), old.raw_bytes,
+                                              Path(new.source), new.raw_bytes)
+
+    def page(self, statuses: list[str] | None = None, scopes: list[str] | None = None,
+             under: str | None = None, page: int = 1, page_size: int = DEFAULT_PAGE_SIZE) -> dict:
+        if statuses and any(value not in ("added", "removed", "modified") for value in statuses):
+            raise ViewerError("status 只能是 added、removed、modified", 400)
+        if scopes and any(value not in ("entry", "root", "tag", "view") for value in scopes):
+            raise ViewerError("scope 只能是 entry、root、tag、view", 400)
+        try:
+            return diff_page(self.changes, self.comparison_id,
+                             statuses, scopes, under, page, page_size)
+        except ToolError as exc:
+            raise ViewerError(str(exc), 400) from exc

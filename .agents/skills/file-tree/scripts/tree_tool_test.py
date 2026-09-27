@@ -119,6 +119,238 @@ class SandboxTest(unittest.TestCase):
         return tool
 
 
+class QueryPaginationCliTest(SandboxTest):
+    def test_json_query_returns_requested_page_with_total(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        import tree_tool
+
+        tool = self.make_tool()
+        out = io.StringIO()
+        with mock.patch.object(tree_tool, "SKILL_DIR", tool.tree_json.parent), \
+             mock.patch.object(tree_tool, "REPO_ROOT", tool.repo_root), \
+             contextlib.redirect_stdout(out):
+            code = tree_tool.main(["query", "--json", "--page", "2", "--page-size", "2"])
+
+        self.assertEqual(code, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["total"], 4)
+        self.assertEqual(payload["total_pages"], 2)
+        self.assertEqual(payload["page"], 2)
+        self.assertEqual(payload["page_size"], 2)
+        self.assertEqual([item["path"] for item in payload["results"]], ["apps/util.ts", "Cargo.toml"])
+
+    def test_json_query_all_preserves_legacy_array_and_rejects_page_mix(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        import tree_tool
+
+        tool = self.make_tool()
+        with mock.patch.object(tree_tool, "SKILL_DIR", tool.tree_json.parent), \
+             mock.patch.object(tree_tool, "REPO_ROOT", tool.repo_root):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(tree_tool.main(["query", "--json", "--all"]), 0)
+            self.assertIsInstance(json.loads(out.getvalue()), list)
+            self.assertEqual(len(json.loads(out.getvalue())), 4)
+
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                code = tree_tool.main(["query", "--json", "--all", "--page", "2"])
+            self.assertEqual(code, 2)
+            self.assertIn("--all", err.getvalue())
+
+    def test_json_query_defaults_to_bounded_first_page(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        import tree_tool
+
+        tool = self.make_tool({"tree": {f"file{i:02}.md": {"desc": "条目"} for i in range(52)}})
+        with mock.patch.object(tree_tool, "SKILL_DIR", tool.tree_json.parent), \
+             mock.patch.object(tree_tool, "REPO_ROOT", tool.repo_root):
+            first = io.StringIO()
+            with contextlib.redirect_stdout(first):
+                self.assertEqual(tree_tool.main(["query", "--json"]), 0)
+            second = io.StringIO()
+            with contextlib.redirect_stdout(second):
+                self.assertEqual(tree_tool.main(["query", "--json", "--page", "2"]), 0)
+        page1 = json.loads(first.getvalue())
+        page2 = json.loads(second.getvalue())
+        self.assertEqual((page1["total"], page1["total_pages"], len(page1["results"])), (52, 2, 50))
+        self.assertEqual([row["path"] for row in page2["results"]], ["file50.md", "file51.md"])
+
+
+class DiffCliTest(unittest.TestCase):
+    def test_diff_ignores_json_layout_when_tree_semantics_match(self):
+        import contextlib
+        import io
+
+        import tree_tool
+
+        data = {"tree": {"a.md": {"desc": "相同", "detail": ["职责"]}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            old_path = Path(tmp) / "old.json"
+            new_path = Path(tmp) / "new.json"
+            old_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            new_path.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n",
+                                encoding="utf-8")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(tree_tool.main(["diff", str(old_path), str(new_path)]), 0)
+        self.assertEqual(json.loads(out.getvalue())["total"], 0)
+
+    def test_diff_reports_only_changed_paths_and_paginates(self):
+        import contextlib
+        import io
+
+        import tree_tool
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old_path = Path(tmp) / "old.json"
+            new_path = Path(tmp) / "new.json"
+            old_path.write_text(json.dumps({"tree": {
+                "dir": {"desc": "目录", "children": {
+                    "one.md": {"desc": "旧简介"},
+                    "removed.md": {"desc": "移除"},
+                }},
+            }}), encoding="utf-8")
+            new_path.write_text(json.dumps({"tree": {
+                "dir": {"desc": "目录", "children": {
+                    "one.md": {"desc": "新简介"},
+                }},
+                "new.md": {"desc": "新增"},
+            }}), encoding="utf-8")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = tree_tool.main(["diff", str(old_path), str(new_path), "--page", "1", "--page-size", "2"])
+
+        self.assertEqual(code, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["total"], 3)
+        self.assertEqual(payload["total_pages"], 2)
+        self.assertEqual(payload["summary"]["by_status"], {"added": 1, "removed": 1, "modified": 1})
+        self.assertEqual(
+            [(row["scope"], row["path"], row["status"]) for row in payload["results"]],
+            [("entry", "dir/one.md", "modified"), ("entry", "dir/removed.md", "removed")],
+        )
+        self.assertEqual(payload["results"][0]["before"]["desc"], "旧简介")
+        self.assertEqual(payload["results"][0]["after"]["desc"], "新简介")
+
+    def test_diff_paginates_root_tag_and_view_changes_with_entries(self):
+        import contextlib
+        import io
+
+        import tree_tool
+
+        old = {"root": "旧根", "tags": {"doc": "旧标签"}, "tree": {"dir": {"desc": "目录", "children": {}}},
+               "views": {"v": {"filter": {"op": "under", "path": "dir"}}}}
+        new = {"root": "新根", "tags": {"doc": "新标签"}, "tree": {"dir": {"desc": "目录", "children": {}}},
+               "views": {"v": {"filter": {"op": "under", "path": "dir"}, "docs": ["docs/a.md"]}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            old_path = Path(tmp) / "old.json"
+            new_path = Path(tmp) / "new.json"
+            old_path.write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+            new_path.write_text(json.dumps(new, ensure_ascii=False), encoding="utf-8")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = tree_tool.main(["diff", str(old_path), str(new_path)])
+
+        self.assertEqual(code, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["total"], 3)
+        self.assertEqual(payload["summary"]["by_scope"], {"root": 1, "tag": 1, "view": 1, "entry": 0})
+        self.assertEqual({(row["scope"], row["key"]) for row in payload["results"]},
+                         {("root", "root"), ("tag", "doc"), ("view", "v")})
+
+    def test_diff_filters_before_pagination_and_keeps_full_summary(self):
+        import contextlib
+        import io
+
+        import tree_tool
+
+        old = {"root": "旧", "tree": {"dir": {"desc": "目录", "children": {
+            "a.md": {"desc": "旧"}, "b.md": {"desc": "删除"}}}, "other.md": {"desc": "删除"}}}
+        new = {"root": "新", "tree": {"dir": {"desc": "目录", "children": {
+            "a.md": {"desc": "新"}, "c.md": {"desc": "新增"}}}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            old_path = Path(tmp) / "old.json"
+            new_path = Path(tmp) / "new.json"
+            old_path.write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+            new_path.write_text(json.dumps(new, ensure_ascii=False), encoding="utf-8")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = tree_tool.main(["diff", str(old_path), str(new_path),
+                                       "--scope", "entry", "--status", "modified",
+                                       "--under", "dir", "--page-size", "1"])
+
+        self.assertEqual(code, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["total_pages"], 1)
+        self.assertEqual([row["path"] for row in payload["results"]], ["dir/a.md"])
+        self.assertEqual(payload["summary"]["by_status"], {"added": 1, "removed": 2, "modified": 2})
+
+    def test_diff_rejects_stale_comparison_id_between_process_calls(self):
+        import contextlib
+        import io
+
+        import tree_tool
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old_path = Path(tmp) / "old.json"
+            new_path = Path(tmp) / "new.json"
+            old_path.write_text('{"tree":{"a.md":{"desc":"旧"}}}', encoding="utf-8")
+            new_path.write_text('{"tree":{"a.md":{"desc":"新"}}}', encoding="utf-8")
+            first = io.StringIO()
+            with contextlib.redirect_stdout(first):
+                self.assertEqual(tree_tool.main(["diff", str(old_path), str(new_path)]), 0)
+            comparison_id = json.loads(first.getvalue())["comparison_id"]
+            self.assertEqual(len(comparison_id), 64)
+
+            new_path.write_text('{"tree":{"a.md":{"desc":"更新"}}}', encoding="utf-8")
+            stale = io.StringIO()
+            with contextlib.redirect_stdout(stale):
+                code = tree_tool.main(["diff", str(old_path), str(new_path),
+                                       "--page", "2", "--expect-id", comparison_id])
+
+        self.assertEqual(code, 2)
+        payload = json.loads(stale.getvalue())
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["error"]["code"], "stale_comparison")
+        self.assertEqual(payload["error"]["expected"], comparison_id)
+        self.assertNotEqual(payload["error"]["actual"], comparison_id)
+
+    def test_diff_rejects_changed_filters_when_resuming_a_page(self):
+        import contextlib
+        import io
+
+        import tree_tool
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old_path = Path(tmp) / "old.json"
+            new_path = Path(tmp) / "new.json"
+            old_path.write_text('{"tree":{"a.md":{"desc":"旧"}}}', encoding="utf-8")
+            new_path.write_text('{"tree":{"a.md":{"desc":"新"},"b.md":{"desc":"新增"}}}', encoding="utf-8")
+            first = io.StringIO()
+            with contextlib.redirect_stdout(first):
+                self.assertEqual(tree_tool.main(["diff", str(old_path), str(new_path),
+                                                 "--status", "added"]), 0)
+            comparison_id = json.loads(first.getvalue())["comparison_id"]
+            second = io.StringIO()
+            with contextlib.redirect_stdout(second):
+                code = tree_tool.main(["diff", str(old_path), str(new_path),
+                                       "--status", "modified", "--page", "2",
+                                       "--expect-id", comparison_id])
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(second.getvalue())["error"]["code"], "stale_comparison")
+
+
 class SortKeyTest(unittest.TestCase):
     def test_case_insensitive_then_codepoint(self):
         names = ["b.ts", "A.ts", "a.ts", "B.ts", "_x", "Zz"]
@@ -657,7 +889,7 @@ class KindFieldTest(SandboxTest):
         with contextlib.redirect_stdout(buf):
             _cmd_query(tool, args)
         payload = json.loads(buf.getvalue())
-        by_path = {e["path"]: e for e in payload}
+        by_path = {e["path"]: e for e in payload["results"]}
         self.assertEqual(by_path["apps"]["kind"], "dir")
         self.assertEqual(by_path["Cargo.toml"]["kind"], "file")
 
@@ -674,7 +906,7 @@ class KindFieldTest(SandboxTest):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             _cmd_query(tool, args)
-        by_path = {e["path"]: e for e in json.loads(buf.getvalue())}
+        by_path = {e["path"]: e for e in json.loads(buf.getvalue())["results"]}
         self.assertIsNone(by_path["apps/main.tsx"]["git-ignore"])  # 缺省继承
         self.assertIs(by_path["apps/exit.rs"]["git-ignore"], False)  # 显式退出
         self.assertIs(by_path["apps/kept.rs"]["git-ignore"], True)
@@ -693,7 +925,7 @@ class KindFieldTest(SandboxTest):
         with contextlib.redirect_stdout(buf):
             _cmd_query(tool, args)
         self.assertEqual(
-            [e["path"] for e in json.loads(buf.getvalue())],
+            [e["path"] for e in json.loads(buf.getvalue())["results"]],
             ["apps", "apps/main.tsx", "apps/ui", "apps/util.ts"],
         )
 
@@ -1074,7 +1306,7 @@ class GitIgnoreTest(SandboxTest):
         with contextlib.redirect_stdout(buf):
             _cmd_query(tool, args)
         payload = json.loads(buf.getvalue())
-        self.assertIs(payload[0]["git-ignore"], True)
+        self.assertIs(payload["results"][0]["git-ignore"], True)
 
     def test_check_exempt_disk_dir_type_mismatch(self):
         # 豁免条目磁盘上是目录：报类型错配并给修正指引，不误诊为"磁盘不存在"（与非豁免分支对称）。

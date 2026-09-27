@@ -1024,4 +1024,30 @@ describe("第二轮审查回归（R1/R4/R7/R10/R11）", () => {
     // 兜底后收敛，不再无限重取
     expect(pending.filter((r) => r.path === "/api/root")).toHaveLength(0);
   });
+
+  it("双快照启动时进入分页差异界面", async () => {
+    window.history.replaceState({}, "", "/?compare=1");
+    try {
+      render(<App />);
+      const rootReq = await waitForReq("GET", "/api/root");
+      rootReq.resolve(jsonOk({ ...rootInfoPayload(1, 2), compare_source: "new-tree.json" }));
+
+      expect(await screen.findByText("文件树差异")).toBeDefined();
+      expect(pending.some((req) => req.path === "/api/children")).toBe(false);
+      const diffReq = await waitForReq("GET", "/api/diff");
+      expect(diffReq.query.get("page")).toBe("1");
+      diffReq.resolve(jsonOk({
+        generation: 1, schema_version: 1, status: "ok", comparison_id: "pair",
+        summary: { by_status: { added: 1, removed: 0, modified: 0 },
+                   by_scope: { entry: 1, root: 0, tag: 0, view: 0 } },
+        filters: { status: [], scope: [], under: null },
+        total: 1, total_pages: 1, page: 1, page_size: 50,
+        results: [{ scope: "entry", path: "new.md", status: "added", before: null,
+                    after: { kind: "file", desc: "新增" } }],
+      }));
+      expect(await screen.findByRole("button", { name: /new\.md/ })).toBeDefined();
+    } finally {
+      window.history.replaceState({}, "", "/");
+    }
+  });
 });

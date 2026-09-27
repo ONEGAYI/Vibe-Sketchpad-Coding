@@ -440,6 +440,76 @@ class HttpServerBase(unittest.TestCase):
         return quote(path, safe="")
 
 
+class DiffHttpApiTest(HttpServerBase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.snapshot_path = self.dir / "old.json"
+        self.compare_path = self.dir / "new.json"
+        self.snapshot_path.write_text(compact_dumps({"tree": {"src": {"desc": "目录", "children": {
+            "a.md": {"desc": "旧"}, "b.md": {"desc": "删除"}}}}}), encoding="utf-8")
+        self.compare_path.write_text(compact_dumps({"tree": {"src": {"desc": "目录", "children": {
+            "a.md": {"desc": "新"}}}, "new.md": {"desc": "新增"}}}), encoding="utf-8")
+        self.server = viewer.create_server(self.snapshot_path, port=0, static_dir=self.dir,
+                                           quiet=True, compare_json=self.compare_path)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.host, self.port = self.server.server_address[:2]
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+    def test_diff_api_pages_and_filters_two_snapshots(self):
+        status, root = self.get_json("/api/root")
+        self.assertEqual(status, 200)
+        self.assertEqual(root["compare_source"], str(self.compare_path))
+        status, page = self.get_json("/api/diff?page=2&page_size=2")
+        self.assertEqual(status, 200)
+        self.assertEqual(page["total"], 3)
+        self.assertEqual(page["total_pages"], 2)
+        self.assertEqual([row["path"] for row in page["results"]], ["src/b.md"])
+        self.assertEqual(page["generation"], root["generation"])
+        status, filtered = self.get_json("/api/diff?status=modified&under=src")
+        self.assertEqual(status, 200)
+        self.assertEqual(filtered["total"], 1)
+        self.assertEqual(filtered["results"][0]["path"], "src/a.md")
+
+    def test_compare_mode_root_redirects_to_lightweight_page(self):
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        try:
+            conn.request("GET", "/")
+            response = conn.getresponse()
+            self.assertEqual(response.status, 302)
+            self.assertEqual(response.getheader("Location"), "/?compare=1")
+            response.read()
+        finally:
+            conn.close()
+
+    def test_refresh_replaces_both_snapshots_or_keeps_old_pair(self):
+        _, before = self.get_json("/api/diff")
+        old_id = before["comparison_id"]
+        old_generation = before["generation"]
+        self.snapshot_path.write_text('{"tree":{"same.md":{"desc":"相同"}}}', encoding="utf-8")
+        self.compare_path.write_text("{invalid", encoding="utf-8")
+        status, _, raw = self.request("POST", "/api/refresh")
+        failed = json.loads(raw.decode("utf-8"))
+        self.assertEqual(status, 400)
+        self.assertFalse(failed["refreshed"])
+        self.assertEqual(failed["generation"], old_generation)
+        _, preserved = self.get_json("/api/diff")
+        self.assertEqual(preserved["comparison_id"], old_id)
+        self.assertEqual(preserved["total"], 3)
+
+        self.compare_path.write_text('{"tree":{"same.md":{"desc":"相同"}}}', encoding="utf-8")
+        status, _, raw = self.request("POST", "/api/refresh")
+        refreshed = json.loads(raw.decode("utf-8"))
+        self.assertEqual(status, 200)
+        self.assertEqual(refreshed["generation"], old_generation + 1)
+        _, after = self.get_json("/api/diff")
+        self.assertEqual(after["total"], 0)
+        self.assertNotEqual(after["comparison_id"], old_id)
+
+
 class ViewerHttpApiTest(HttpServerBase):
     @classmethod
     def setUpClass(cls):

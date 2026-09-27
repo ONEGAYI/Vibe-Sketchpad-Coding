@@ -6,7 +6,7 @@
 
 ## 用途
 
-- **deploy**：把 file-tree 技能装进目标仓库（默认 `.agents/skills/file-tree/`）。首次部署复制固定清单十二件与 `dist/viewer/` 静态资源、初始化空 `tree.json`（新紧凑规范格式）、渲染 AGENTS.md 标记块；已有技能时为升级模式——以 dist 为准镜像同步，清理旧残留文件（含过期 hash 静态资源）与 `__pycache__`
+- **deploy**：把 file-tree 技能装进目标仓库（默认 `.agents/skills/file-tree/`）。首次部署复制固定清单十三件与 `dist/viewer/` 静态资源、初始化空 `tree.json`（新紧凑规范格式）、渲染 AGENTS.md 标记块；已有技能时为升级模式——以 dist 为准镜像同步，清理旧残留文件（含过期 hash 静态资源）与 `__pycache__`
 - **update-dist**：应急回收——从任意仓库的部署实例提取固定清单刷新 dist（散落改动未主线化时用，常规迭代不走此命令）
 - 数据与历史保护：目标仓库的 `tree.json` 与撤销历史永不覆盖、永不清理；`tree.json` 为规范旧排版（两空格缩进）时升级保留原字节不改写（GUI 资源随技能安装同样不提前转换），下次正常写入自动转换为新紧凑格式，仅结构不规范（如缺派生 `kind`）才做规范化迁移；部署后自检失败则整体报错，不留半成品
 - 查看器发行（G16/G18）：`frontend/` 下 `npm run build` 一键完成 vite 构建与 `dist/viewer/` 组装（幂等镜像、外链质量门、旧 hash 清理）；**目标机器运行 GUI 只需 Python 3.8+（启动门槛）与现代浏览器，无需 Node / npm install / vite build**
@@ -21,6 +21,8 @@
 点击关闭抽屉图标旁的 **层级浏览**，侧栏展开到可用宽的 **80%**，切换为逐列选择目录；拖动不会进入此模式。列内纵向滚动、多列局部横向滚动，右侧展示摘要。点击 **收起层级** 或 **收起并阅读全文**，恢复普通宽度和当前选中。可用宽不超过600px时上下排列，抽屉按钮仍可切换视图。
 
 搜索通过回车或按钮提交。折叠筛选保留输入，切换布局保留搜索结果、页码和未提交草稿；命中定位后可用 **返回搜索** 回到原页。刷新重读同一快照，保留有效选择和布局；若有搜索结果则按原条件重新查询第一页。
+
+两份快照可用 `tree_tool.py diff <旧tree.json> <新tree.json>` 让 Agent 逐页读取变化；`query --json` 也默认分页。查看器以 `viewer.py <旧tree.json> --compare <新tree.json>` 启动时，按变化类型、类别和路径子树筛选分页列表，点开查看前后值。比较语义与续页校验见 [快照比较参考](dist/references/diff.md)。
 
 布局偏好只在本次页面会话中保存。浏览、展开和调宽不修改 `tree.json`，也不产生核心工具的撤销记录。2026-09-12 的真实浏览器、十万条目和离线部署证据见 [GUI 改造验收报告](docs/gui-redesign-verification.md)。
 
@@ -48,4 +50,4 @@ cd skills/deploy-file-tree-skill/frontend && npm install && npm run build
 
 - Python 3 标准库，无第三方依赖
 - 前端（仅构建期）：React 18 + TypeScript + Vite 5，依赖由 package-lock.json 锁定
-- unittest 契约测试（部署器32用例、查看器123用例；沙箱目标仓库模式）
+- unittest 契约测试（部署器、核心工具与查看器均使用沙箱目标仓库或临时快照）

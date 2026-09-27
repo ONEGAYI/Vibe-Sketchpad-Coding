@@ -22,7 +22,8 @@ deploy-file-tree-skill/
 │   └── src/ …             # 前端源码与组件测试
 └── dist/                  # file-tree 技能开发主线兼发行快照（公用内容，微缩于此）
     ├── SKILL.md           # 技能主入口（通用说明）
-    ├── references/        # 按需阅读的合并、视图与只读查看器参考
+    ├── references/        # 按需阅读的比较、合并、视图与只读查看器参考
+    │   ├── diff.md
     │   ├── merge.md
     │   ├── views.md
     │   └── viewer.md
@@ -40,7 +41,7 @@ deploy-file-tree-skill/
         └── assets/        # Vite 哈希产物（JS/CSS，相对引用、不依赖 CDN）
 ```
 
-dist 只含**公用内容**（固定清单十二件 + `viewer/` 静态资源动态清单），不含任何仓库数据——`tree.json`（文件树数据）、`.history.json`（本机撤销历史）、AGENTS.md（目标仓库的规则文档）都属于各仓库私有。
+dist 只含**公用内容**（固定清单十三件 + `viewer/` 静态资源动态清单），不含任何仓库数据——`tree.json`（文件树数据）、`.history.json`（本机撤销历史）、AGENTS.md（目标仓库的规则文档）都属于各仓库私有。
 
 **开发主线在此**：file-tree 技能的迭代直接修改主仓库（Vibe-Sketchpad-Coding）`skills/deploy-file-tree-skill/dist/` 下的内容；脚本以自身位置相对定位 dist，主仓库副本与本机安装副本（`~/.agents/skills/deploy-file-tree-skill/`）均可运行 deploy。
 
@@ -53,6 +54,8 @@ python ~/.agents/skills/deploy-file-tree-skill/scripts/deploy.py deploy <目标�
 # 应急回收：从任意仓库的部署实例提取固定清单刷新 dist（散落改动未主线化时用，非常规流程）
 python ~/.agents/skills/deploy-file-tree-skill/scripts/deploy.py update-dist <源仓库> [--source-dir .agents/skills/file-tree]
 ```
+
+**给目标仓库升级时**，直接运行本机安装副本的 `deploy <目标仓库>`；脚本从自身目录读取随附的 `dist/`，无需查找开发主仓库。只有本机母体缺失或版本过旧，才需要取得新版母体。
 
 ## 查看器发行快照的构建与组装（G16/G18）
 
@@ -86,12 +89,12 @@ python .agents/skills/file-tree/scripts/viewer.py <tree.json 路径> [--port N] 
 
 ## 部署语义（镜像同步）
 
-- **首次部署**：复制固定清单十二件（主入口、三份按需参考、元数据、核心脚本与查看器脚本）与 `dist/viewer/` 静态资源 → 初始化空 `tree.json`（新紧凑规范格式）→ 渲染 AGENTS.md 标记块（无文件则生成骨架）→ 自动 `check` 自检。
+- **首次部署**：复制固定清单十三件（主入口、四份按需参考、元数据、核心脚本与查看器脚本）与 `dist/viewer/` 静态资源 → 初始化空 `tree.json`（新紧凑规范格式）→ 渲染 AGENTS.md 标记块（无文件则生成骨架）→ 自动 `check` 自检。
 - **升级部署**（目标已有技能）：以 dist 为准覆盖公用文件，**清理** dist 中已不存在的旧版本残留文件（含过期 hash 的 viewer 静态资源）与 `__pycache__`、回收空目录——废弃文件的升级能真正到位；viewer 现行资源在清单内不会被误删。注意：清理以 dist 清单为准，技能目录内**用户自放的额外文件也会在升级时被清理**（自留内容请放技能目录之外），数据与历史除外（见下条）。
 - **永不触碰数据与历史**：目标仓库的 `tree.json`（文件树数据）与 `.history.json`（本机撤销历史，或位于目标仓库 git 私有区）不被覆盖、不被清理。升级时对 `tree.json` 的有效性判定与 `check` 同源：新旧两种规范排版（紧凑 / 旧两空格缩进）均为有效数据，**不重写任何字节**（GUI 资源随技能安装同样不提前转换，#15 延迟转换语义），留待下次正常写入时自动转换为新紧凑格式；仅结构不规范（如缺 `kind` 派生字段）才做规范化结构迁移（数据语义不变，直接输出新紧凑格式）。撤销历史位置随目标环境自动判定（git 私有区优先，非 git 退化技能目录，仓库后初始化时自动收敛）。
 - 部署后自检（check）失败则整体报错，不留半成品状态。
 
-## 升级流程（技能迭代时）
+## 维护技能母体并发布新版（仅修改技能本体时）
 
 1. 在主仓库（Vibe-Sketchpad-Coding）`skills/deploy-file-tree-skill/dist/` 直接修改 file-tree 技能并验证（`dist/scripts/tree_tool_test.py` 全绿；自举用例在无数据环境自动跳过，部署后在目标仓库 `check --strict` 复核）；前端源码改动则执行 `frontend` 下 `npm run build` 重组装 `dist/viewer/` 发行快照；
 2. 提交主仓库——dist 即开发主线，不再经 update-dist 中转；
@@ -108,6 +111,7 @@ python .agents/skills/file-tree/scripts/viewer.py <tree.json 路径> [--port N] 
 - 录入目录（整目录粗粒度收录）：同命令加 `--dir`，批量清单条目写 `"dir": true`；磁盘目录未声明时脚本也会自动识别并提示
 - 全量校验：`... check --strict`（新仓库会提示 git 文件未收录，属正常，逐条 add 即可）
 - 撤销误操作：`... undo` / `redo` / `history`
-- 浏览快照（GUI，无需 Node）：`python .agents/skills/file-tree/scripts/viewer.py <tree.json>`，替换 JSON 后页面刷新即可
+- 浏览或比较快照（GUI，无需 Node）：`python .agents/skills/file-tree/scripts/viewer.py <旧tree.json> [--compare <新tree.json>]`；两份快照刷新会原子换代
+- Agent 分页比较：`python .agents/skills/file-tree/scripts/tree_tool.py diff <旧tree.json> <新tree.json> --page 1`，后续页传 `--expect-id`
 
 契约测试：`python ~/.agents/skills/deploy-file-tree-skill/scripts/deploy_test.py`（含无 Node 启动全链用例）
