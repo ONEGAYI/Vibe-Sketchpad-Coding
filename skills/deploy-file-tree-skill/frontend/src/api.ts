@@ -6,6 +6,9 @@
 
 import type {
   ChildEntry,
+  DiffResponse,
+  DiffScope,
+  DiffStatus,
   EntryDetail,
   GenerationStamped,
   RefreshResponse,
@@ -60,6 +63,13 @@ export const api = {
     getJson<SearchResponse & GenerationStamped>(
       `/api/search?${buildSearchQuery(params, page, pageSize)}`,
     ),
+  diff: (filters: { status?: DiffStatus; scope?: DiffScope; under?: string }, page = 1, pageSize = 50) => {
+    const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (filters.status) query.set("status", filters.status);
+    if (filters.scope) query.set("scope", filters.scope);
+    if (filters.under) query.set("under", filters.under);
+    return getJson<DiffResponse & GenerationStamped>(`/api/diff?${query}`);
+  },
   /**
    * 手动刷新（G12）：后端重读同一路径 tree.json 并原子替换；
    * 失败抛 ApiError（旧数据在后端保持可用，前端标明"未刷新"）。

@@ -61,7 +61,8 @@ git 之外（未被跟踪且被 ignore 规则覆盖，二者违反其一均报�
   python tree_tool.py mv <src> <dst>
   python tree_tool.py mv-batch <manifest.json>
   python tree_tool.py get <path>...             # 查看条目（可多路径批量）
-  python tree_tool.py query [--kw 关键词] [--tag 标签] [--rel-of 路径] [--under 目录] [--depth N] [--json]
+  python tree_tool.py query [--kw 关键词] [--tag 标签] [--rel-of 路径] [--under 目录] [--depth N] [--json [--page N] [--page-size N] | --json --all]
+  python tree_tool.py diff <旧tree.json> <新tree.json> [--page N] [--page-size N] [--expect-id ID]
   python tree_tool.py mark <dir> [--tags a,b] [--tags-mode add|replace]
                          [--git-ignore|--no-git-ignore] [--depth N]
   python tree_tool.py tag-add <名> -d 说明
@@ -98,6 +99,8 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = SKILL_DIR.parents[2]
 
 FIELD_ORDER = ["kind", "desc", "detail", "rel", "tags", "collapsed", "hidden", "git-ignore", "children"]
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 200
 
 TREE_BEGIN = "<!-- file-tree:tree:begin 由脚本渲染，禁止手改 -->"
 TREE_END = "<!-- file-tree:tree:end -->"
@@ -149,6 +152,23 @@ def default_history_path(repo_root: Path, skill_dir: Path) -> Path:
 
 class ToolError(Exception):
     """确定性错误：路径非法、条目缺失、不变量冲突等。"""
+
+
+def paginate_results(items: list, page: int = 1, page_size: int = DEFAULT_PAGE_SIZE) -> dict:
+    """确定性分页信封；查询、快照比较和查看器共用。"""
+    if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+        raise ToolError(f"page 必须是正整数: {page!r}")
+    if not isinstance(page_size, int) or isinstance(page_size, bool) or not 1 <= page_size <= MAX_PAGE_SIZE:
+        raise ToolError(f"page_size 必须是 1..{MAX_PAGE_SIZE} 的整数: {page_size!r}")
+    total = len(items)
+    start = (page - 1) * page_size
+    return {
+        "total": total,
+        "total_pages": (total + page_size - 1) // page_size,
+        "page": page,
+        "page_size": page_size,
+        "results": items[start:start + page_size],
+    }
 
 
 class MergeDecisionError(ToolError):
@@ -721,6 +741,118 @@ def walk_entries(children: dict, prefix: list[str]):
         yield path, node
         if is_dir(node) and node["children"]:
             yield from walk_entries(node["children"], prefix + [name])
+
+
+def load_snapshot_data(path: Path) -> tuple[dict, bytes]:
+    """只读解析任意位置的 tree.json；返回规范化数据和原始字节。"""
+    path = Path(path)
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ToolError(f"无法读取快照 {path}: {exc}") from exc
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ToolError(f"快照不是合法 UTF-8 JSON {path}: {exc}") from exc
+    try:
+        return normalize_data(data), raw
+    except (ToolError, RecursionError) as exc:
+        raise ToolError(f"快照结构非法 {path}: {exc}") from exc
+
+
+def snapshot_pair_id(old_path: Path, old_raw: bytes, new_path: Path, new_raw: bytes) -> str:
+    """以两份来源路径与原始字节计算无进程状态的比较标识。"""
+    digest = hashlib.sha256()
+    for path, raw in ((old_path, old_raw), (new_path, new_raw)):
+        encoded_path = str(Path(path).resolve()).encode("utf-8")
+        digest.update(len(encoded_path).to_bytes(8, "big"))
+        digest.update(encoded_path)
+        digest.update(len(raw).to_bytes(8, "big"))
+        digest.update(raw)
+    return digest.hexdigest()
+
+
+def diff_request_id(pair_id: str, statuses: list[str] | None = None,
+                    scopes: list[str] | None = None, under: str | None = None) -> str:
+    """比较标识同时绑定快照和筛选条件，续页不能悄悄换过滤器。"""
+    identity = {
+        "pair": pair_id,
+        "status": sorted(set(statuses or [])),
+        "scope": sorted(set(scopes or [])),
+        "under": "/".join(split_rel_path(under)) if under else None,
+    }
+    encoded = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def diff_tree_data(old: dict, new: dict) -> list[dict]:
+    """比较规范化后的顶层元数据和条目本地字段；子项逐条报告。"""
+    old_nodes = dict(walk_entries(old["tree"], []))
+    new_nodes = dict(walk_entries(new["tree"], []))
+    changes = []
+    missing = object()
+    for scope, old_items, new_items in (
+        ("root", {"root": old["root"]} if "root" in old else {}, {"root": new["root"]} if "root" in new else {}),
+        ("tag", old.get("tags", {}), new.get("tags", {})),
+        ("view", old.get("views", {}), new.get("views", {})),
+    ):
+        for key in sorted(old_items.keys() | new_items.keys(), key=sort_key):
+            before = old_items.get(key, missing)
+            after = new_items.get(key, missing)
+            if before == after:
+                continue
+            status = "added" if before is missing else "removed" if after is missing else "modified"
+            changes.append({"scope": scope, "key": key, "status": status,
+                            "before": None if before is missing else before,
+                            "after": None if after is missing else after})
+    for path in sorted(old_nodes.keys() | new_nodes.keys(), key=sort_key):
+        old_node = old_nodes.get(path)
+        new_node = new_nodes.get(path)
+        before = None if old_node is None else {k: v for k, v in old_node.items() if k != "children"}
+        after = None if new_node is None else {k: v for k, v in new_node.items() if k != "children"}
+        if before == after:
+            continue
+        status = "added" if before is None else "removed" if after is None else "modified"
+        changes.append({"scope": "entry", "path": path, "status": status, "before": before, "after": after})
+    return changes
+
+
+def filter_diff_changes(changes: list[dict], statuses: list[str] | None = None,
+                        scopes: list[str] | None = None, under: str | None = None) -> list[dict]:
+    """先筛选变化，再交给共用分页设施；under 仅命中条目路径。"""
+    under_parts = split_rel_path(under) if under else None
+    selected = []
+    for row in changes:
+        if statuses and row["status"] not in statuses:
+            continue
+        if scopes and row["scope"] not in scopes:
+            continue
+        if under_parts is not None:
+            if row["scope"] != "entry" or row["path"].split("/")[:len(under_parts)] != under_parts:
+                continue
+        selected.append(row)
+    return selected
+
+
+def diff_page(changes: list[dict], comparison_id: str,
+              statuses: list[str] | None = None, scopes: list[str] | None = None,
+              under: str | None = None, page: int = 1,
+              page_size: int = DEFAULT_PAGE_SIZE) -> dict:
+    """CLI 与查看器共用的筛选、计数和分页输出契约。"""
+    filtered = filter_diff_changes(changes, statuses, scopes, under)
+    return {
+        "schema_version": 1,
+        "status": "ok",
+        "comparison_id": diff_request_id(comparison_id, statuses, scopes, under),
+        "summary": {
+            "by_status": {status: sum(row["status"] == status for row in changes)
+                          for status in ("added", "removed", "modified")},
+            "by_scope": {scope: sum(row["scope"] == scope for row in changes)
+                         for scope in ("root", "tag", "view", "entry")},
+        },
+        "filters": {"status": statuses or [], "scope": scopes or [], "under": under},
+        **paginate_results(filtered, page, page_size),
+    }
 
 
 def render_children_lines(children: dict, prefix: str) -> list[str]:
@@ -2509,9 +2641,16 @@ def _cmd_mark(tool: TreeTool, args) -> None:
 
 
 def _cmd_query(tool: TreeTool, args) -> None:
+    page_arg = getattr(args, "page", None)
+    size_arg = getattr(args, "page_size", None)
+    all_rows = getattr(args, "all", False)
+    if not args.json and (page_arg is not None or size_arg is not None or all_rows):
+        raise ToolError("--page、--page-size、--all 须与 --json 同用")
+    if all_rows and (page_arg is not None or size_arg is not None):
+        raise ToolError("--all 与 --page/--page-size 不能同时使用")
     results = tool.query(kw=args.kw, tag=args.tag, rel_of=args.rel_of, under=args.under, depth=args.depth)
     if args.json:
-        payload = [
+        rows = [
             {
                 "path": path,
                 "kind": "dir" if is_dir(node) else "file",
@@ -2526,6 +2665,15 @@ def _cmd_query(tool: TreeTool, args) -> None:
             }
             for path, node in results
         ]
+        if all_rows:
+            payload = rows
+        else:
+            payload = {
+                "schema_version": 1,
+                "query": {"kw": args.kw, "tag": args.tag, "rel_of": args.rel_of, "under": args.under, "depth": args.depth},
+                **paginate_results(rows, 1 if page_arg is None else page_arg,
+                                   DEFAULT_PAGE_SIZE if size_arg is None else size_arg),
+            }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
     for path, node in results:
@@ -2533,6 +2681,25 @@ def _cmd_query(tool: TreeTool, args) -> None:
         tags = f" [{' '.join(node['tags'])}]" if node.get("tags") else ""
         print(f"{path}{kind} — {node.get('desc', '')}{tags}")
     print(f"共 {len(results)} 条")
+
+
+def _cmd_diff(_tool: TreeTool, args) -> int:
+    old, old_raw = load_snapshot_data(Path(args.old))
+    new, new_raw = load_snapshot_data(Path(args.new))
+    pair_id = snapshot_pair_id(Path(args.old), old_raw, Path(args.new), new_raw)
+    comparison_id = diff_request_id(pair_id, args.status, args.scope, args.under)
+    if args.expect_id is not None and args.expect_id != comparison_id:
+        print(json.dumps({
+            "schema_version": 1, "status": "error",
+            "error": {"code": "stale_comparison", "message": "两份快照已变化，请从第 1 页重新读取",
+                      "expected": args.expect_id, "actual": comparison_id},
+        }, ensure_ascii=False, indent=2))
+        return 2
+    changes = diff_tree_data(old, new)
+    payload = diff_page(changes, pair_id, args.status, args.scope, args.under,
+                        args.page, args.page_size)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
 
 
 def _cmd_tag_add(tool: TreeTool, args) -> None:
@@ -2690,6 +2857,18 @@ def main(argv=None) -> int:
     p = sub.add_parser("merge", help="两阶段合并 Git 冲突：先自动合并并输出冲突 JSON，再用 --decisions 提交人工决定")
     p.add_argument("--decisions", help="Agent 决定文件 JSON；不提供时仅执行自动阶段，存在冲突则不写盘")
 
+    p = sub.add_parser("diff", help="只读比较两份 tree.json 快照，输出分页变化清单")
+    p.add_argument("old", help="旧快照路径")
+    p.add_argument("new", help="新快照路径")
+    p.add_argument("--page", type=int, default=1)
+    p.add_argument("--page-size", type=int, default=DEFAULT_PAGE_SIZE)
+    p.add_argument("--status", action="append", choices=("added", "removed", "modified"),
+                   help="变化类型筛选，可重复")
+    p.add_argument("--scope", action="append", choices=("entry", "root", "tag", "view"),
+                   help="条目或元数据类别筛选，可重复")
+    p.add_argument("--under", help="条目路径子树筛选；提供时不包含顶层元数据变化")
+    p.add_argument("--expect-id", help="续页期望的比较标识；文件变化时拒绝并提示从第 1 页重读")
+
     p = sub.add_parser("add", help="新增/更新条目（自动建父目录，写后自动渲染）")
     p.add_argument("path", help="仓库相对路径，如 apps/cli/src/main.rs")
     p.add_argument("-d", "--desc", help="一句话介绍（≤20 字）")
@@ -2740,6 +2919,9 @@ def main(argv=None) -> int:
     p.add_argument("--under", help="限定目录子树（锚点自身含入；须为树中目录条目）")
     p.add_argument("--depth", type=int, help="相对 --under 的层数上限（1=直接子级）；须与 --under 同用")
     p.add_argument("--json", action="store_true", help="机器可读输出")
+    p.add_argument("--page", type=int, help="JSON 结果页码（从 1 开始）")
+    p.add_argument("--page-size", type=int, help=f"每页条数（1..{MAX_PAGE_SIZE}）")
+    p.add_argument("--all", action="store_true", help="显式输出旧版完整 JSON 数组")
 
     p = sub.add_parser("mark", help="子树批量标记：tags 追加/覆写与 git-ignore 传播到目录子树（可限深度）")
     p.add_argument("path", help="树中已展开 children 的目录条目（锚点自身不动）")
@@ -2833,6 +3015,7 @@ def main(argv=None) -> int:
     )
     handlers = {
         "merge": _cmd_merge,
+        "diff": _cmd_diff,
         "add": _cmd_add,
         "add-batch": _cmd_add_batch,
         "rm": _cmd_rm,

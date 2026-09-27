@@ -73,12 +73,39 @@ export interface SearchResponse {
   results: SearchHit[];
 }
 
+export type DiffStatus = "added" | "removed" | "modified";
+export type DiffScope = "entry" | "root" | "tag" | "view";
+
+export interface DiffChange {
+  scope: DiffScope;
+  path?: string;
+  key?: string;
+  status: DiffStatus;
+  before: unknown;
+  after: unknown;
+}
+
+export interface DiffResponse {
+  schema_version: number;
+  status: "ok";
+  comparison_id: string;
+  summary: { by_status: Record<DiffStatus, number>; by_scope: Record<DiffScope, number> };
+  filters: { status: DiffStatus[]; scope: DiffScope[]; under: string | null };
+  total: number;
+  total_pages: number;
+  page: number;
+  page_size: number;
+  results: DiffChange[];
+}
+
 export interface RootInfo {
   root: string;
   /** 标签词表：名 -> 说明 */
   tags: Record<string, string>;
   counts: { dirs: number; files: number; total: number };
   source: string;
+  compare_source?: string;
+  generation?: number;
 }
 
 /** POST /api/refresh 成功响应：新世代号 + 根信息。 */
@@ -89,6 +116,7 @@ export interface RefreshResponse {
   tags: Record<string, string>;
   counts: { dirs: number; files: number; total: number };
   source: string;
+  compare_source?: string;
 }
 
 /** 世代号戳：后端给每个查询响应的统一盖章（G12 版本隔离）。 */

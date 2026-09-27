@@ -1,6 +1,6 @@
 ---
 name: file-tree
-description: 在已部署 file-tree 的仓库中，同步新增、删除或移动的文件与目录，更新或查询文件职责及 rel/tags，提交前校验文件树，合并 tree.json 的 Git 冲突，或只读浏览快照时使用。不用于维护 README 等其他手写文件树。
+description: 在已部署 file-tree 的仓库中，同步新增、删除或移动的文件与目录，更新或查询文件职责及 rel/tags，提交前校验文件树，合并 tree.json 的 Git 冲突，比对两份 tree.json 快照，或只读浏览快照时使用。不用于维护 README 等其他手写文件树。
 ---
 
 # 文件树维护与查询
@@ -19,6 +19,7 @@ description: 在已部署 file-tree 的仓库中，同步新增、删除或移�
 
 - **条目、标签、查询和校验**：使用下方命令速查；维护完成后运行 `check --strict`。
 - **Git 冲突**：运行 `merge` 前阅读 [两阶段合并参考](references/merge.md)，按机器可读清单提交决定。
+- **两树 diff 与分页查询**：阅读 [快照比较参考](references/diff.md)，使用 `diff`、`query --json --page` 或查看器双快照模式。
 - **视图和多文档标记块**：阅读 [视图完整参考](references/views.md)，再使用 `view-*` 命令。
 - **只读浏览**：使用文末查看器入口；需要操作或排错细节时阅读 [查看器使用参考](references/viewer.md)。
 
@@ -45,8 +46,10 @@ merge [--decisions <文件.json>]    # Git 冲突两阶段处理：自动三方�
 mark <dir> [--tags a,b] [--tags-mode add|replace] [--git-ignore|--no-git-ignore] [--depth N]
                                   # 子树批量标记（见下）：tags 追加/覆写 + git-ignore 传播，可限深度
 get <path> [path...]             # 查看条目全部字段（可多路径批量，条间空行分隔）
-query [--kw 关键词] [--tag 标签] [--rel-of 路径] [--under 目录] [--depth N] [--json]
-                                  # 组合过滤；--rel-of 反查谁关联到我；--under 限定子树（锚点含入），--depth 相对层数（须与 --under 同用）
+query [--kw 关键词] [--tag 标签] [--rel-of 路径] [--under 目录] [--depth N] [--json [--page N] [--page-size N] | --json --all]
+                                  # 组合过滤；JSON 默认分页，--all 显式保留旧版完整数组；参数见 references/diff.md
+diff <旧tree.json> <新tree.json> [--page N] [--page-size N] [--status added|removed|modified]... [--scope entry|root|tag|view]... [--under 目录] [--expect-id ID]
+                                  # 只读语义比较；每次命令独立运行、分页结果可用比较 ID 核对，详见 references/diff.md
 tag-add <名> -d "说明"           # 登记受控标签
 tag-rm <名>                      # 删除标签（仍被条目使用时拒绝）
 view-add <id> ...                 # 登记视图；参数与边界见 references/views.md
@@ -101,7 +104,7 @@ root [<名字>|--clear]            # 查看/固定/清除渲染根名；未固�
 需要浏览或搜索 `tree.json` 快照时，运行技能自带的只读网页查看器。快照可在仓库外；运行需要 Python 3.8+ 与现代浏览器，无需 Node：
 
 ```bash
-python .agents/skills/file-tree/scripts/viewer.py <tree.json 路径> [--port N] [--host H]
+python .agents/skills/file-tree/scripts/viewer.py <tree.json 路径> [--compare <第二份tree.json>] [--port N] [--host H]
 ```
 
-查看器仅浏览数据，不写 `tree.json`、不转换格式、不生成撤销历史。需要刷新、远端访问、界面操作、启动排错或兼容性细节时，再读 [查看器使用参考](references/viewer.md)。
+查看器仅浏览数据，不写 `tree.json`、不转换格式、不生成撤销历史。双快照比较和分页语义见 [快照比较参考](references/diff.md)；需要刷新、远端访问、界面操作、启动排错或兼容性细节时，再读 [查看器使用参考](references/viewer.md)。

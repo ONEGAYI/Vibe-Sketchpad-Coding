@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { api } from "./api";
+import type { GenerationStamped, RootInfo } from "./types";
 import { useTreeBrowser } from "./useTreeBrowser";
 import { VirtualTree } from "./components/VirtualTree";
 import { DetailPanel } from "./components/DetailPanel";
@@ -8,14 +10,15 @@ import { Breadcrumb } from "./components/Breadcrumb";
 import { HelpPanel } from "./components/HelpPanel";
 import { SplitLayout } from "./components/SplitLayout";
 import { ColumnBrowser } from "./components/ColumnBrowser";
+import { DiffViewer } from "./components/DiffViewer";
 import drawerOpen from "./assets/drawer-open.svg";
 import drawerClosed from "./assets/drawer-closed.svg";
 import "./index.css";
 
 const ROOT_PLACEHOLDER = "文件树查看器";
 
-/** 页面装配与帮助交互；浏览状态统一由控制层持有。 */
-export default function App() {
+/** 单快照页面装配与帮助交互；浏览状态统一由控制层持有。 */
+function TreeApp() {
   const [hierarchyOpen, setHierarchyOpen] = useState(false);
   const {
     rootInfo, childrenCache, childrenState, expanded, selected, detail, detailLoading,
@@ -185,4 +188,45 @@ export default function App() {
       <HelpPanel open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
   );
+}
+
+/** 比较模式只取根摘要与分页差异，启动时不加载旧树的全部根级子项。 */
+function CompareApp() {
+  const [root, setRoot] = useState<(RootInfo & GenerationStamped) | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  useEffect(() => {
+    let active = true;
+    api.root().then((value) => { if (active) setRoot(value); })
+      .catch((cause: unknown) => {
+        if (active) setError(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => { active = false; };
+  }, []);
+
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      const value = await api.refresh();
+      setRoot(value);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  if (root?.compare_source) {
+    return <DiffViewer oldSource={root.source} newSource={root.compare_source}
+      generation={root.generation} refreshing={refreshing} onRefresh={refresh} error={error} />;
+  }
+  return <div className="app"><p className="muted loading" role={error ? "alert" : undefined}>
+    {error ?? (root ? "服务未启用双快照比较" : "正在读取快照…")}
+  </p></div>;
+}
+
+export default function App() {
+  return new URLSearchParams(window.location.search).get("compare") === "1"
+    ? <CompareApp /> : <TreeApp />;
 }

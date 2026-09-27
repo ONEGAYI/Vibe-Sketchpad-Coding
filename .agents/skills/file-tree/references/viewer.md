@@ -5,13 +5,14 @@
 ## 启动与刷新
 
 ```bash
-python .agents/skills/file-tree/scripts/viewer.py <tree.json 路径> [--port N] [--host H]
+python .agents/skills/file-tree/scripts/viewer.py <tree.json 路径> [--compare <第二份tree.json>] [--port N] [--host H]
 ```
 
 - 运行需要 Python 3.8+ 与现代浏览器，无需 Node。页面发行资源随技能部署在 `viewer/`。启动后打印访问地址，默认 `http://127.0.0.1:8618/`；按 Ctrl+C 停止。
 - 默认仅监听本机。远端浏览时可自行建立 SSH 隧道：`ssh -L 8618:127.0.0.1:8618 user@server`，再在工作站浏览器访问默认地址。
 - 快照可位于仓库之外，例如从旧机复制来的 JSON；查看器不需要源仓库、`.git` 或 AGENTS.md。复制 JSON 本身不需要 Python，运行查看器才需要。
 - 浏览、搜索、刷新不写数据、不转换格式、不生成撤销历史。替换同一路径的 `tree.json` 后，在页面点**刷新**即可重读，不必重启或重新构建。
+- 启动时加 `--compare` 会进入两树差异页面。变化列表可按新增、删除、修改及路径子树筛选并分页，点开查看字段前后值；刷新须两份快照均成功读取才一起替换。CLI 与 API 的分页格式、比较语义见 [快照比较参考](diff.md)。
 
 ## 界面操作
 
