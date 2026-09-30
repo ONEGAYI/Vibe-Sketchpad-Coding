@@ -26,3 +26,5 @@ desktop.ini
 .idea/
 *.swp
 .zcode/
+# ZCode 本地排除配置（内容由 .gitignore 同步生成，不入库）
+.zcodeignore
