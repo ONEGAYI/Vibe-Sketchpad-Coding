@@ -1,6 +1,6 @@
 ---
 name: file-tree
-description: 在已部署 file-tree 的仓库中，同步新增、删除或移动的文件与目录，更新或查询文件职责及 rel/tags，提交前校验文件树，合并 tree.json 的 Git 冲突，比对两份 tree.json 快照，或只读浏览快照时使用。不用于维护 README 等其他手写文件树。
+description: 在已部署 file-tree 的仓库中，同步新增、删除或移动的文件与目录，更新或查询文件职责及 rel/tags，提交前校验文件树，合并 tree.json 的 Git 冲突，比对两份 tree.json 快照，或只读浏览快照时使用。对 tree.json、tags 词表与 AGENTS.md 树块的一切写操作必须经由本技能脚本 scripts/tree_tool.py 完成：脚本是唯一写入口，禁止手改。不用于维护 README 等其他手写文件树。
 ---
 
 # 文件树维护与查询
