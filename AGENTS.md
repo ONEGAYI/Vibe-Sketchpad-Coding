@@ -25,6 +25,8 @@ Vibe-Sketchpad-Coding/
 │   │   ├── README.md                 # 目录说明：收录范围与约定
 │   │   └── 目录.md                     # 目录索引：本地插件与外部资源
 │   └── README.md # 目录说明：按平台分组约定
+├── mcp/        # MCP 工具成员目录
+│   └── qq-music-mcp/… # QQ 音乐控制 MCP
 ├── prompts/    # 提示词工具成员目录
 │   ├── AGENTS片段/ # 通用提示词片段工具
 │   │   ├── README.md  # 工具说明：用途、片单、约定
